@@ -1,0 +1,4 @@
+numpy>=2.0
+pydicom>=3.0
+scikit-image>=0.25
+

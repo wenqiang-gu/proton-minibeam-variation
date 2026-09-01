@@ -1,0 +1,62 @@
+[study]
+name = "ptv2017fw_minibeam_variation"
+generated_directory = "generated"
+output_directory = "output"
+
+[patient]
+dicom_directory = "dicom_9306087_fine"
+rtstruct = "dicom_9306087_fine/RTSTRUCT.dcm"
+roi_name = "PTV2017fw"
+frame_rotation_deg = [-90.0, 180.0, 0.0]
+
+[sweep]
+slit_width_mm = [0.4, 0.6, 0.8]
+ctc_mm = [3.0, 4.0, 5.0, 6.0, 7.0]
+angles_deg = [45.0, 135.0, 225.0, 315.0]
+shift_fractions = [0.0, 0.25, 0.5, 0.75]
+
+[aperture]
+radius_mm = 45.0
+snout_radius_mm = 60.0
+thickness_mm = 60.0
+slit_height_mm = 20.0
+max_slits = 20
+downstream_surface_distance_mm = 123.45
+
+[beam]
+time_feature_file = "reference/beam_1_2e5.txt"
+spot_count = 2151
+source_distance_mm = 450.0
+
+[scoring]
+voxel_size_mm = [0.4, 0.4, 3.0]
+output_type = "Binary"
+
+[topas]
+threads = 20
+show_history_interval = 100000
+physics_modules = ["g4em-standard_opt4", "g4h-phy_QGSP_BIC_HP", "g4decay", "g4ion-binarycascade", "g4h-elastic_HP", "g4stopping"]
+
+[visualization]
+# Enable only for interactive geometry checks; keep false for Slurm runs.
+active = true
+type = "OpenGL"
+window_size = [1000, 1000]
+theta_deg = 70.0
+phi_deg = 20.0
+zoom = 1.0
+include_geometry = true
+include_trajectories = false
+include_axes = true
+axes_component = "World"
+axes_size_mm = 200.0
+
+[profiles.smoke]
+history_mode = "uniform"
+histories_per_spot = 100
+chunks = 1
+
+[profiles.production]
+history_mode = "scaled"
+history_scale = 1.0
+chunks = 50

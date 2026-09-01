@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+generated/
+output/
+Slurm/logs/
+dicom_*/
+
