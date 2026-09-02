@@ -2,7 +2,7 @@
 """Generate deterministic TOPAS proton-minibeam inputs from study.toml."""
 from __future__ import annotations
 
-import argparse, csv, hashlib, json, math, os, re, shutil, sys, tempfile, tomllib
+import argparse, csv, hashlib, json, math, os, re, shutil, sys, tempfile
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from itertools import product
@@ -12,6 +12,11 @@ from typing import Any
 import numpy as np
 import pydicom
 from skimage.draw import polygon
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 and older
+    import tomli as tomllib
 
 
 class Error(RuntimeError): pass

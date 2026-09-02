@@ -1,4 +1,8 @@
-numpy>=2.0
-pydicom>=3.0
-scikit-image>=0.25
-
+numpy==1.24.4; python_version < "3.9"
+numpy>=2.0; python_version >= "3.9"
+pydicom>=2.4,<3.0; python_version < "3.10"
+pydicom>=3.0; python_version >= "3.10"
+scikit-image>=0.21,<0.22; python_version < "3.9"
+scikit-image>=0.22,<0.25; python_version >= "3.9" and python_version < "3.10"
+scikit-image>=0.25; python_version >= "3.10"
+tomli>=2.0; python_version < "3.11"

@@ -8,7 +8,8 @@ summed. Every angle reuses the imported 2,151-spot beam-1 model.
 
 ## Setup
 
-Use Python 3.11 or newer:
+Use Python 3.8 or newer. Python versions before 3.11 use the `tomli`
+compatibility package because `tomllib` is not yet part of the standard library:
 
 ```sh
 python3 -m venv .venv
