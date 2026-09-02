@@ -11,7 +11,7 @@ frame_rotation_deg = [-90.0, 180.0, 0.0]
 
 [sweep]
 slit_width_mm = [0.4, 0.6, 0.8]
-ctc_mm = [3.0, 4.0, 5.0, 6.0, 7.0]
+ctc_mm = [3.0, 5.0, 7.0] # [3.0, 4.0, 5.0, 6.0, 7.0]
 angles_deg = [45.0, 135.0, 225.0, 315.0]
 shift_fractions = [0.0, 0.25, 0.5, 0.75]
 
@@ -38,8 +38,7 @@ show_history_interval = 100000
 physics_modules = ["g4em-standard_opt4", "g4h-phy_QGSP_BIC_HP", "g4decay", "g4ion-binarycascade", "g4h-elastic_HP", "g4stopping"]
 
 [visualization]
-# Enable only for interactive geometry checks; keep false for Slurm runs.
-active = false
+# Settings for the standalone generated/<profile>/visTest.txt input.
 type = "OpenGL"
 window_size = [1000, 1000]
 theta_deg = 70.0
@@ -47,11 +46,15 @@ phi_deg = 20.0
 zoom = 1.0
 # Keep interactive views in stored OpenGL mode for this voxelized geometry.
 switch_ogl_to_ogli_if_voxel_count_exceeds = 1000000000
+# Must exceed the 18,604,960-voxel CT to draw selected patient slices.
+show_only_outline_if_voxel_count_exceeds = 20000000
 include_geometry = true
 include_trajectories = false
 include_axes = true
 axes_component = "World"
 axes_size_mm = 200.0
+# DICOM patient slice numbers are one-based.
+slices_z = [54]
 
 [profiles.smoke]
 history_mode = "uniform"

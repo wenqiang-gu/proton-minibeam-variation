@@ -40,17 +40,19 @@ Shorten any sweep list in `study.toml` to generate a subset. The scorer voxel
 size, history scale, chunks, threads, patient-frame rotation, and aperture are
 also configurable.
 
-Interactive OpenGL visualization is controlled by `[visualization]`. Set
-`active = true` and regenerate the selected profile to emit the configured
-window, camera, geometry, trajectory, and world-axis settings. Keep it disabled
-for Slurm production runs. The configured OpenGL voxel threshold is deliberately
-high so interactive views remain in stored mode instead of switching to the
-slower immediate mode.
+Interactive OpenGL visualization is controlled by `[visualization]`. Each
+profile always gets a separate `visTest.txt` that uses the first generated task,
+disables dose scoring, and runs one spot with one history. Production fields and
+tasks contain no graphics settings. The configured OpenGL voxel threshold is
+deliberately high so the interactive view remains in stored mode instead of
+switching to the slower immediate mode. `slices_z` selects one or more one-based
+DICOM patient slices to display in the visualization input. The outline
+threshold must exceed the CT voxel count for those selected slices to be drawn.
 
 ## Generated layout
 
 Each profile has `common/`, 60 reusable `apertures/`, 240 angle-specific
-`fields/`, runnable `tasks/`, `inputs.txt`, CSV/JSON manifests, and a geometry
+`fields/`, runnable `tasks/`, a standalone `visTest.txt`, `inputs.txt`, CSV/JSON manifests, and a geometry
 `summary.json`. A name such as `smoke_sw040_ctc300_shift025_angle135` means
 0.40 mm width, 3.00 mm CTC, 25% shift, and 135 degrees.
 

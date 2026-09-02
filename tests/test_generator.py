@@ -1,4 +1,3 @@
-import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,15 +59,18 @@ class GeneratorTests(unittest.TestCase):
 
     def test_default_matrix_and_apertures(self):
         cases = g.cases(self.config, "smoke")
-        self.assertEqual(len(cases), 240)
-        self.assertEqual(len({g.ap_name(x.aperture) for x in cases}), 60)
+        sweep = g.table(self.config, "sweep")
+        expected_cases = np.prod([len(sweep[key]) for key in ("slit_width_mm", "ctc_mm", "shift_fractions", "angles_deg")])
+        expected_apertures = np.prod([len(sweep[key]) for key in ("slit_width_mm", "ctc_mm", "shift_fractions")])
+        self.assertEqual(len(cases), expected_cases)
+        self.assertEqual(len({g.ap_name(x.aperture) for x in cases}), expected_apertures)
         a = g.table(self.config, "aperture")
         for case in cases:
             self.assertLessEqual(case.aperture.count, 20)
             for x in case.aperture.positions:
                 self.assertLessEqual((abs(x)+case.width/2)**2+(a["slit_height_mm"]/2)**2, a["radius_mm"]**2+1e-9)
         output_directories = g.case_output_directories(ROOT, self.config, "smoke")
-        self.assertEqual(len(output_directories), 240)
+        self.assertEqual(len(output_directories), expected_cases)
         self.assertTrue(all(str(path).startswith(str(ROOT / "output/smoke")) for path in output_directories))
 
     def test_actual_ptv_centroid(self):
@@ -105,15 +107,20 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn('So/ProtonSource/Component = "BeamPosition2"', source)
 
     def test_visualization_is_configurable(self):
-        self.assertEqual(g.render_visualization(self.config), 'b:Gr/ViewA/Active = "False"\n')
-        config = copy.deepcopy(self.config)
-        config["visualization"]["active"] = True
-        rendered = g.render_visualization(config)
+        rendered = g.render_visualization(self.config)
         self.assertIn('s:Gr/ViewA/Type = "OpenGL"', rendered)
         self.assertIn('b:Gr/ViewA/Active = "True"', rendered)
         self.assertIn('i:Gr/SwitchOGLtoOGLIifVoxelCountExceeds = 1000000000', rendered)
+        self.assertIn('i:Gr/ShowOnlyOutlineIfVoxelCountExceeds = 20000000', rendered)
         self.assertIn('b:Gr/ViewA/IncludeTrajectories = "False"', rendered)
         self.assertIn('d:Gr/ViewA/AxesSize = 200 mm', rendered)
+        field = g.render_field(self.config, g.cases(self.config, "smoke")[0], "smoke")
+        self.assertNotIn('Gr/ViewA', field)
+        vis_test = g.render_vis_test(self.config, "generated/smoke/tasks/example.txt")
+        self.assertIn('includeFile = generated/smoke/tasks/example.txt', vis_test)
+        self.assertIn('b:Sc/PatientDose/Active = "False"', vis_test)
+        self.assertIn('i:Ts/NumberOfThreads = 1', vis_test)
+        self.assertIn('iv:Ge/Patient/ShowSpecificSlicesZ = 1 54', vis_test)
 
 
 if __name__ == "__main__": unittest.main()

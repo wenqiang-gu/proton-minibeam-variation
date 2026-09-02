@@ -100,7 +100,7 @@ def load_config(path: Path) -> dict[str, Any]:
     integer(top,"threads"); integer(top,"show_history_interval")
     if not isinstance(top.get("physics_modules"),list) or not all(isinstance(x,str) for x in top["physics_modules"]): raise Error("physics_modules must be strings")
     view=table(c,"visualization")
-    for key in ("active","include_geometry","include_trajectories","include_axes"):
+    for key in ("include_geometry","include_trajectories","include_axes"):
         if not isinstance(view.get(key),bool): raise Error(f"visualization.{key} must be true or false")
     if not isinstance(view.get("type"),str) or not view["type"]: raise Error("visualization.type must be a non-empty string")
     if not isinstance(view.get("axes_component"),str) or not view["axes_component"]: raise Error("visualization.axes_component must be a non-empty string")
@@ -109,6 +109,11 @@ def load_config(path: Path) -> dict[str, Any]:
     for key in ("theta_deg","phi_deg"):
         if isinstance(view.get(key),bool) or not isinstance(view.get(key),(int,float)): raise Error(f"visualization.{key} must be numeric")
     integer(view,"switch_ogl_to_ogli_if_voxel_count_exceeds")
+    integer(view,"show_only_outline_if_voxel_count_exceeds")
+    slices=view.get("slices_z")
+    if not isinstance(slices,list) or not slices or any(isinstance(x,bool) or not isinstance(x,int) or x<=0 for x in slices):
+        raise Error("visualization.slices_z must be a non-empty array of positive integers")
+    if len(slices)!=len(set(slices)): raise Error("visualization.slices_z contains duplicates")
     for key in ("zoom","axes_size_mm"): num(view,key)
     p=table(c,"patient")
     if not isinstance(p.get("frame_rotation_deg"),list) or len(p["frame_rotation_deg"]) != 3: raise Error("frame_rotation_deg needs three values")
@@ -312,7 +317,6 @@ def tf_bool(value): return '"True"' if value else '"False"'
 
 def render_visualization(c):
     view=table(c,"visualization")
-    if not view["active"]: return 'b:Gr/ViewA/Active = "False"\n'
     width,height=view["window_size"]
     return f'''s:Gr/ViewA/Type = "{view["type"]}"
 b:Gr/ViewA/Active = "True"
@@ -322,12 +326,32 @@ d:Gr/ViewA/Theta = {fmt(view["theta_deg"])} deg
 d:Gr/ViewA/Phi = {fmt(view["phi_deg"])} deg
 u:Gr/ViewA/Zoom = {fmt(view["zoom"])}
 i:Gr/SwitchOGLtoOGLIifVoxelCountExceeds = {integer(view,"switch_ogl_to_ogli_if_voxel_count_exceeds")}
+i:Gr/ShowOnlyOutlineIfVoxelCountExceeds = {integer(view,"show_only_outline_if_voxel_count_exceeds")}
 b:Gr/ViewA/IncludeGeometry = {tf_bool(view["include_geometry"])}
 b:Gr/ViewA/IncludeTrajectories = {tf_bool(view["include_trajectories"])}
 b:Gr/ViewA/IncludeAxes = {tf_bool(view["include_axes"])}
 s:Gr/ViewA/AxesComponent = "{view["axes_component"]}"
 d:Gr/ViewA/AxesSize = {fmt(view["axes_size_mm"])} mm
 '''
+
+
+def render_vis_test(c,task_path):
+    slices=table(c,"visualization")["slices_z"]
+    return f'''# Generated standalone visualization input; do not use for dose production.
+includeFile = {task_path}
+
+b:Ge/QuitIfOverlapDetected = "False"
+i:Ts/NumberOfThreads = 1
+d:Tf/TimelineStart = 0 ms
+d:Tf/TimelineEnd = 1 ms
+i:Tf/NumberOfSequentialTimes = 1
+i:So/ProtonSource/NumberOfHistoriesInRun = 1
+b:Sc/PatientDose/Active = "False"
+b:Ts/UseQt = "True"
+b:Ts/PauseBeforeQuit = "True"
+b:Ts/IncludeDefaultGeant4QtWidgets = "True"
+iv:Ge/Patient/ShowSpecificSlicesZ = {len(slices)} {" ".join(map(str,slices))}
+{render_visualization(c)}'''
 
 
 def render_field(c,case,profile):
@@ -356,7 +380,6 @@ s:Sc/PatientDose/OutputType = "{sc.get("output_type","Binary")}"
 s:Sc/PatientDose/IfOutputFileAlreadyExists = "Overwrite"
 b:Sc/PatientDose/OutputToConsole = "False"
 sv:Sc/PatientDose/Report = 1 "Sum"
-{render_visualization(c)}
 '''
 
 
@@ -376,6 +399,8 @@ s:Sc/PatientDose/SeriesDescription = "{case.case_id} {suffix}"
 
 def build_tree(dest,root,c,profile,ct,center,production):
     histories,chunks=profile_data(c,profile,production); chunks_data=split_histories(histories,chunks); all_cases=cases(c,profile)
+    slices=table(c,"visualization")["slices_z"]
+    if any(x>len(ct.origins) for x in slices): raise Error(f"visualization.slices_z must be between 1 and {len(ct.origins)}")
     write(dest/'common/patient.txt',render_patient(c,ct,center)); write(dest/'common/source.txt',render_source(c))
     apertures={ap_name(x.aperture):x.aperture for x in all_cases}
     for name,ap in sorted(apertures.items()): write(dest/'apertures'/name,render_aperture(c,ap))
@@ -387,6 +412,7 @@ def build_tree(dest,root,c,profile,ct,center,production):
             text,output,sd=render_task(c,case,profile,j,chunks,h); write(dest/'tasks'/name,text); paths.append(rel)
             records.append(dict(case_id=case.case_id,profile=profile,slit_width_mm=case.width,ctc_mm=case.ctc,shift_fraction=case.shift,shift_mm=case.shift*case.ctc,angle_deg=case.angle,slit_count=case.aperture.count,chunk=j,chunks=chunks,chunk_histories=sum(h),seed=sd,input_path=rel,output_path=output))
     write(dest/'inputs.txt',"\n".join(paths)+"\n"); write(dest/'manifest.json',json.dumps(records,indent=2)+"\n")
+    write(dest/'visTest.txt',render_vis_test(c,paths[0]))
     (dest/'manifest.csv').parent.mkdir(parents=True,exist_ok=True)
     with (dest/'manifest.csv').open('w',newline='') as f: w=csv.DictWriter(f,fieldnames=list(records[0])); w.writeheader(); w.writerows(records)
     summary=dict(profile=profile,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,ct_shape=[ct.cols,ct.rows,len(ct.origins)],ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=center.local.tolist())
