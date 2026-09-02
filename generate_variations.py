@@ -108,6 +108,7 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(window,list) or len(window)!=2 or any(isinstance(x,bool) or not isinstance(x,int) or x<=0 for x in window): raise Error("visualization.window_size must contain two positive integers")
     for key in ("theta_deg","phi_deg"):
         if isinstance(view.get(key),bool) or not isinstance(view.get(key),(int,float)): raise Error(f"visualization.{key} must be numeric")
+    integer(view,"switch_ogl_to_ogli_if_voxel_count_exceeds")
     for key in ("zoom","axes_size_mm"): num(view,key)
     p=table(c,"patient")
     if not isinstance(p.get("frame_rotation_deg"),list) or len(p["frame_rotation_deg"]) != 3: raise Error("frame_rotation_deg needs three values")
@@ -320,6 +321,7 @@ i:Gr/ViewA/WindowSizeY = {height}
 d:Gr/ViewA/Theta = {fmt(view["theta_deg"])} deg
 d:Gr/ViewA/Phi = {fmt(view["phi_deg"])} deg
 u:Gr/ViewA/Zoom = {fmt(view["zoom"])}
+i:Gr/SwitchOGLtoOGLIifVoxelCountExceeds = {integer(view,"switch_ogl_to_ogli_if_voxel_count_exceeds")}
 b:Gr/ViewA/IncludeGeometry = {tf_bool(view["include_geometry"])}
 b:Gr/ViewA/IncludeTrajectories = {tf_bool(view["include_trajectories"])}
 b:Gr/ViewA/IncludeAxes = {tf_bool(view["include_axes"])}

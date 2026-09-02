@@ -1,0 +1,16 @@
+# Generated task definitions first
+includeFile = generated/smoke/fields/smoke_sw040_ctc300_shift000_angle045.txt
+
+# Visualization overrides must come last
+b:Ge/QuitIfOverlapDetected = "False"
+
+# Disable dose scoring and hide its parallel world.
+b:Sc/PatientDose/Active = "False"
+sv:Gr/ViewA/VisibleWorlds = 1 "World"
+
+# Keep stored OpenGL mode.
+i:Gr/SwitchOGLtoOGLIifVoxelCountExceeds = 1000000000
+
+# Allow detailed patient rendering, but select only slice 54.
+i:Gr/ShowOnlyOutlineIfVoxelCountExceeds = 20000000
+iv:Ge/Patient/ShowSpecificSlicesZ = 2 1 54

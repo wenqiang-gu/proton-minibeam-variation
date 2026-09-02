@@ -43,7 +43,9 @@ also configurable.
 Interactive OpenGL visualization is controlled by `[visualization]`. Set
 `active = true` and regenerate the selected profile to emit the configured
 window, camera, geometry, trajectory, and world-axis settings. Keep it disabled
-for Slurm production runs.
+for Slurm production runs. The configured OpenGL voxel threshold is deliberately
+high so interactive views remain in stored mode instead of switching to the
+slower immediate mode.
 
 ## Generated layout
 

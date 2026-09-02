@@ -45,6 +45,8 @@ window_size = [1000, 1000]
 theta_deg = 70.0
 phi_deg = 20.0
 zoom = 1.0
+# Keep interactive views in stored OpenGL mode for this voxelized geometry.
+switch_ogl_to_ogli_if_voxel_count_exceeds = 1000000000
 include_geometry = true
 include_trajectories = false
 include_axes = true

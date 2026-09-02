@@ -111,6 +111,7 @@ class GeneratorTests(unittest.TestCase):
         rendered = g.render_visualization(config)
         self.assertIn('s:Gr/ViewA/Type = "OpenGL"', rendered)
         self.assertIn('b:Gr/ViewA/Active = "True"', rendered)
+        self.assertIn('i:Gr/SwitchOGLtoOGLIifVoxelCountExceeds = 1000000000', rendered)
         self.assertIn('b:Gr/ViewA/IncludeTrajectories = "False"', rendered)
         self.assertIn('d:Gr/ViewA/AxesSize = 200 mm', rendered)
 
