@@ -21,7 +21,7 @@ snout_radius_mm = 60.0
 thickness_mm = 60.0
 slit_height_mm = 20.0
 max_slits = 20
-downstream_surface_distance_mm = 123.45
+downstream_surface_distance_mm = 500.0
 
 [beam]
 time_feature_file = "reference/beam_1_2e5.txt"
@@ -39,7 +39,7 @@ physics_modules = ["g4em-standard_opt4", "g4h-phy_QGSP_BIC_HP", "g4decay", "g4io
 
 [visualization]
 # Enable only for interactive geometry checks; keep false for Slurm runs.
-active = true
+active = false
 type = "OpenGL"
 window_size = [1000, 1000]
 theta_deg = 70.0
