@@ -33,7 +33,7 @@ voxel_size_mm = [0.4, 0.4, 3.0]
 output_type = "Binary"
 
 [topas]
-threads = 20
+threads = 8
 show_history_interval = 100000
 physics_modules = ["g4em-standard_opt4", "g4h-phy_QGSP_BIC_HP", "g4decay", "g4ion-binarycascade", "g4h-elastic_HP", "g4stopping"]
 
