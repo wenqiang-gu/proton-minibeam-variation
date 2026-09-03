@@ -87,12 +87,26 @@ The worker uses `/data/maia/$USER/Applications/TOPAS/opentopas-env.sh` unless
 very large dose files; verify disk, memory, and scheduler limits with smoke runs
 before submitting production.
 
+Plot an X-Y dose distribution at a one-based patient-grid Z slice:
+
+```sh
+python Slurm/plot_dose_xy.py \
+  output/smoke/smoke_sw040_ctc300_shift000_angle045/Dose_chunk_001_of_001.bin \
+  --z-slice 54
+```
+
+The script reads grid dimensions from the companion `.binheader`, uses voxel
+indices on the axes, and normalizes the selected slice maximum to 100% by
+default. Pass `--normalization none` to retain raw DoseToMedium values in Gy, or
+`--shape NX NY NZ` if dimensions cannot be parsed from the header.
+
 ## Tests
 
 ```sh
 python -m unittest discover -s tests -v
 ```
 
-Tests cover real and rotated DICOM geometry, ROI errors, the 240-case matrix,
-aperture containment, history reconstruction, stable seeds, beam vectors, and
-deterministic generation. TOPAS transport must be checked on a TOPAS host.
+Tests cover real and rotated DICOM geometry, ROI errors, the case matrix,
+aperture containment, history reconstruction, stable seeds, beam vectors,
+deterministic generation, and binary dose-slice parsing. TOPAS transport must be
+checked on a TOPAS host.
