@@ -100,6 +100,17 @@ indices on the axes, and normalizes the selected slice maximum to 100% by
 default. Pass `--normalization none` to retain raw DoseToMedium values in Gy, or
 `--shape NX NY NZ` if dimensions cannot be parsed from the header.
 
+For an interactive window with zoom, pan, and coordinate inspection, run:
+
+```sh
+python Slurm/plot_dose_xy.py DOSE.bin --z-slice 54 --interactive
+```
+
+Interactive-only mode does not write a PNG. Add `--output slice.png` to both
+save and display the figure. Interactive mode requires a graphical Matplotlib
+backend and normally will not work on a headless Slurm compute node; omit
+`--interactive` there to use the PNG-producing `Agg` backend.
+
 ## Tests
 
 ```sh

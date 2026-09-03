@@ -36,6 +36,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="normalize the slice maximum to 100%% or retain Gy (default: max)",
     )
     parser.add_argument("--output", type=Path, help="output PNG path")
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="open a blocking interactive window; save only when --output is also given",
+    )
     parser.add_argument("--title", help="custom figure title")
     parser.add_argument("--colormap", default="viridis", help="Matplotlib colormap")
     parser.add_argument("--dpi", type=int, default=180, help="PNG resolution")
@@ -131,9 +135,37 @@ def scale_plane(plane: np.ndarray, normalization: str) -> tuple[np.ndarray, str,
     return plane, "DoseToMedium (Gy)", lower, upper
 
 
+def ensure_interactive_backend(matplotlib_module) -> None:
+    backend = str(matplotlib_module.get_backend())
+    noninteractive = {
+        "agg", "cairo", "pdf", "pgf", "ps", "svg", "template",
+    }
+    normalized = backend.lower()
+    if normalized in noninteractive or "matplotlib_inline" in normalized:
+        raise PlotError(
+            f"--interactive requires a graphical Matplotlib backend, but {backend!r} "
+            "is active. Run in a desktop or forwarded graphical session, or omit "
+            "--interactive to write a PNG."
+        )
+
+
+def output_path(input_path: Path, requested: Path | None, z_slice: int, interactive: bool) -> Path | None:
+    if requested is not None:
+        output = requested.resolve()
+    elif interactive:
+        return None
+    else:
+        output = input_path.with_suffix("").with_name(
+            f"{input_path.stem}_z_slice_{z_slice}.png"
+        )
+    if output.suffix.lower() != ".png":
+        raise PlotError(f"Output must have a .png extension: {output}")
+    return output
+
+
 def plot_xy(
-    output: Path, plane: np.ndarray, z_slice: int, normalization: str,
-    colormap: str, title: str | None, dpi: int,
+    output: Path | None, plane: np.ndarray, z_slice: int, normalization: str,
+    colormap: str, title: str | None, dpi: int, interactive: bool = False,
 ) -> None:
     try:
         temporary_root = Path(os.environ.get("TMPDIR", "/tmp"))
@@ -142,7 +174,10 @@ def plot_xy(
         os.environ.setdefault("MPLCONFIGDIR", str(cache))
         os.environ.setdefault("XDG_CACHE_HOME", str(temporary_root))
         import matplotlib
-        matplotlib.use("Agg")
+        if interactive:
+            ensure_interactive_backend(matplotlib)
+        else:
+            matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as error:
         raise PlotError(
@@ -152,7 +187,15 @@ def plot_xy(
         raise PlotError(f"Unknown Matplotlib colormap: {colormap}")
     image, label, vmin, vmax = scale_plane(plane, normalization)
     ny, nx = plane.shape
-    figure, axis = plt.subplots(figsize=(8.0, 7.0), constrained_layout=True)
+    try:
+        figure, axis = plt.subplots(figsize=(8.0, 7.0), constrained_layout=True)
+    except Exception as error:
+        if interactive:
+            raise PlotError(
+                "Could not open an interactive Matplotlib window. Run in a desktop "
+                "or forwarded graphical session, or omit --interactive to write a PNG."
+            ) from error
+        raise
     plotted = axis.imshow(
         image, origin="lower", extent=(0.5, nx + 0.5, 0.5, ny + 0.5),
         interpolation="nearest", cmap=colormap, vmin=vmin, vmax=vmax,
@@ -162,9 +205,14 @@ def plot_xy(
     axis.set_ylabel("Patient-grid Y index (1-based)")
     figure.colorbar(plotted, ax=axis, shrink=0.88, pad=0.025).set_label(label)
     figure.suptitle(title or f"Dose distribution at Z slice {z_slice}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output, dpi=dpi, bbox_inches="tight")
-    plt.close(figure)
+    try:
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(output, dpi=dpi, bbox_inches="tight")
+        if interactive:
+            plt.show(block=True)
+    finally:
+        plt.close(figure)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -178,16 +226,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     lines = read_header(input_path) if args.shape is None else []
     shape = grid_shape(lines, args.shape)
     z_index = select_z_slice(args.z_slice, shape[2])
-    output = (
-        args.output.resolve() if args.output is not None else
-        input_path.with_suffix("").with_name(f"{input_path.stem}_z_slice_{args.z_slice}.png")
-    )
-    if output.suffix.lower() != ".png":
-        raise PlotError(f"Output must have a .png extension: {output}")
+    output = output_path(input_path, args.output, args.z_slice, args.interactive)
     plane = read_xy_slice(input_path, shape, z_index)
-    plot_xy(output, plane, args.z_slice, args.normalization, args.colormap, args.title, args.dpi)
+    plot_xy(
+        output, plane, args.z_slice, args.normalization, args.colormap,
+        args.title, args.dpi, args.interactive,
+    )
     print(f"Grid: X={shape[0]}, Y={shape[1]}, Z={shape[2]}")
-    print(f"Wrote X-Y dose plot for Z slice {args.z_slice}: {output}")
+    if output is not None:
+        print(f"Wrote X-Y dose plot for Z slice {args.z_slice}: {output}")
+    if args.interactive:
+        print(f"Closed interactive X-Y dose plot for Z slice {args.z_slice}")
     return 0
 
 

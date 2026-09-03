@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -86,6 +87,48 @@ class PlotDoseXYTests(unittest.TestCase):
                 ])
             self.assertEqual(result, 0)
             np.testing.assert_array_equal(plot_xy.call_args.args[1], np.arange(12, 24).reshape(3, 4))
+
+    def test_output_selection_for_static_and_interactive_modes(self):
+        input_path = Path("/tmp/Dose.bin")
+        self.assertEqual(
+            plot.output_path(input_path, None, 54, False),
+            Path("/tmp/Dose_z_slice_54.png"),
+        )
+        self.assertIsNone(plot.output_path(input_path, None, 54, True))
+        self.assertEqual(
+            plot.output_path(input_path, Path("/tmp/custom.png"), 54, True),
+            Path("/tmp/custom.png").resolve(),
+        )
+
+    def test_interactive_main_does_not_select_default_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = self.make_dose(Path(directory))
+            with mock.patch.object(plot, "plot_xy") as plot_xy:
+                result = plot.main([str(path), "--z-slice", "1", "--interactive"])
+            self.assertEqual(result, 0)
+            self.assertIsNone(plot_xy.call_args.args[0])
+            self.assertTrue(plot_xy.call_args.args[-1])
+
+    def test_interactive_plot_requests_blocking_show(self):
+        plane = np.array([[0.0, 1.0], [2.0, 3.0]])
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(os.environ, {
+                 "MPLCONFIGDIR": directory,
+                 "XDG_CACHE_HOME": directory,
+             }), \
+             mock.patch.object(plot, "ensure_interactive_backend"):
+            import matplotlib
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+            with mock.patch.object(plt, "show") as show:
+                plot.plot_xy(None, plane, 1, "max", "viridis", None, 72, True)
+            show.assert_called_once_with(block=True)
+
+    def test_interactive_mode_rejects_noninteractive_backend(self):
+        backend = mock.Mock()
+        backend.get_backend.return_value = "Agg"
+        with self.assertRaisesRegex(plot.PlotError, "graphical Matplotlib backend"):
+            plot.ensure_interactive_backend(backend)
 
 
 if __name__ == "__main__":
