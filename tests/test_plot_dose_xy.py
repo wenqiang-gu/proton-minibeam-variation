@@ -39,6 +39,17 @@ class PlotDoseXYTests(unittest.TestCase):
             plane = plot.read_xy_slice(path, (4, 3, 2), 1)
             np.testing.assert_array_equal(plane, volume[1])
 
+    def test_omitted_slice_computes_maximum_along_z(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, volume = self.make_dose(Path(directory))
+            plane = plot.read_xy_plane(path, (4, 3, 2), None)
+            np.testing.assert_array_equal(plane, np.max(volume, axis=0))
+
+            volume[0, 0, 0] = -np.inf
+            volume.astype("<f8").tofile(path)
+            with self.assertRaisesRegex(plot.PlotError, "Dose volume contains non-finite"):
+                plot.read_xy_plane(path, (4, 3, 2), None)
+
     def test_validates_binary_size_and_nonfinite_values(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -96,6 +107,11 @@ class PlotDoseXYTests(unittest.TestCase):
         )
         self.assertIsNone(plot.output_path(input_path, None, 54, True))
         self.assertEqual(
+            plot.output_path(input_path, None, None, False),
+            Path("/tmp/Dose_z_max.png"),
+        )
+        self.assertIsNone(plot.output_path(input_path, None, None, True))
+        self.assertEqual(
             plot.output_path(input_path, Path("/tmp/custom.png"), 54, True),
             Path("/tmp/custom.png").resolve(),
         )
@@ -107,6 +123,25 @@ class PlotDoseXYTests(unittest.TestCase):
                 result = plot.main([str(path), "--z-slice", "1", "--interactive"])
             self.assertEqual(result, 0)
             self.assertIsNone(plot_xy.call_args.args[0])
+            self.assertTrue(plot_xy.call_args.args[-1])
+
+    def test_projection_main_uses_z_max_and_explicit_output_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, volume = self.make_dose(Path(directory))
+            with mock.patch.object(plot, "plot_xy") as plot_xy:
+                result = plot.main([str(path)])
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                plot_xy.call_args.args[0],
+                path.with_name("Dose_z_max.png").resolve(),
+            )
+            self.assertIsNone(plot_xy.call_args.args[2])
+            np.testing.assert_array_equal(plot_xy.call_args.args[1], np.max(volume, axis=0))
+
+            output = Path(directory) / "both.png"
+            with mock.patch.object(plot, "plot_xy") as plot_xy:
+                plot.main([str(path), "--interactive", "--output", str(output)])
+            self.assertEqual(plot_xy.call_args.args[0], output.resolve())
             self.assertTrue(plot_xy.call_args.args[-1])
 
     def test_interactive_plot_requests_blocking_show(self):

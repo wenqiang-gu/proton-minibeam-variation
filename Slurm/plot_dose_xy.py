@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot an X-Y dose distribution from one TOPAS binary dose Z slice."""
+"""Plot an X-Y slice or Z-maximum projection from one TOPAS binary dose."""
 from __future__ import annotations
 
 import argparse
@@ -24,8 +24,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path, help="TOPAS binary dose .bin file")
     parser.add_argument(
-        "--z-slice", type=int, required=True, metavar="N",
-        help="one-based patient-grid Z slice number",
+        "--z-slice", type=int, metavar="N",
+        help="one-based patient-grid Z slice number (default: maximum along Z)",
     )
     parser.add_argument(
         "--shape", type=int, nargs=3, metavar=("NX", "NY", "NZ"),
@@ -98,7 +98,9 @@ def select_z_slice(z_slice: int, nz: int) -> int:
     return z_slice - 1
 
 
-def read_xy_slice(path: Path, shape: tuple[int, int, int], z_index: int) -> np.ndarray:
+def read_xy_plane(
+    path: Path, shape: tuple[int, int, int], z_index: int | None,
+) -> np.ndarray:
     if path.suffix.lower() != ".bin":
         raise PlotError(f"Input must have a .bin extension: {path}")
     if not path.is_file():
@@ -114,11 +116,30 @@ def read_xy_slice(path: Path, shape: tuple[int, int, int], z_index: int) -> np.n
             f"for shape {shape} and float64 values"
         )
     volume = np.memmap(path, dtype="<f8", mode="r", shape=(nz, ny, nx))
-    plane = np.array(volume[z_index, :, :])
+    if z_index is not None:
+        plane = np.array(volume[z_index, :, :])
+    else:
+        # Check every input voxel while keeping memory use to one X-Y plane.
+        plane = np.full((ny, nx), -np.inf, dtype=np.float64)
+        for current_z in range(nz):
+            current_plane = np.asarray(volume[current_z, :, :])
+            if not np.all(np.isfinite(current_plane)):
+                del volume
+                raise PlotError(
+                    "Dose volume contains non-finite values; "
+                    "cannot calculate the Z-maximum projection"
+                )
+            np.maximum(plane, current_plane, out=plane)
     del volume
     if not np.all(np.isfinite(plane)):
-        raise PlotError(f"Z slice {z_index + 1} contains non-finite dose values")
+        location = f"Z slice {z_index + 1}" if z_index is not None else "Z-maximum projection"
+        raise PlotError(f"{location} contains non-finite dose values")
     return plane
+
+
+def read_xy_slice(path: Path, shape: tuple[int, int, int], z_index: int) -> np.ndarray:
+    """Backward-compatible helper for extracting one Z slice."""
+    return read_xy_plane(path, shape, z_index)
 
 
 def scale_plane(plane: np.ndarray, normalization: str) -> tuple[np.ndarray, str, float, float]:
@@ -149,14 +170,17 @@ def ensure_interactive_backend(matplotlib_module) -> None:
         )
 
 
-def output_path(input_path: Path, requested: Path | None, z_slice: int, interactive: bool) -> Path | None:
+def output_path(
+    input_path: Path, requested: Path | None, z_slice: int | None, interactive: bool,
+) -> Path | None:
     if requested is not None:
         output = requested.resolve()
     elif interactive:
         return None
     else:
+        suffix = f"z_slice_{z_slice}" if z_slice is not None else "z_max"
         output = input_path.with_suffix("").with_name(
-            f"{input_path.stem}_z_slice_{z_slice}.png"
+            f"{input_path.stem}_{suffix}.png"
         )
     if output.suffix.lower() != ".png":
         raise PlotError(f"Output must have a .png extension: {output}")
@@ -164,7 +188,7 @@ def output_path(input_path: Path, requested: Path | None, z_slice: int, interact
 
 
 def plot_xy(
-    output: Path | None, plane: np.ndarray, z_slice: int, normalization: str,
+    output: Path | None, plane: np.ndarray, z_slice: int | None, normalization: str,
     colormap: str, title: str | None, dpi: int, interactive: bool = False,
 ) -> None:
     try:
@@ -204,7 +228,11 @@ def plot_xy(
     axis.set_xlabel("Patient-grid X index (1-based)")
     axis.set_ylabel("Patient-grid Y index (1-based)")
     figure.colorbar(plotted, ax=axis, shrink=0.88, pad=0.025).set_label(label)
-    figure.suptitle(title or f"Dose distribution at Z slice {z_slice}")
+    default_title = (
+        f"Dose distribution at Z slice {z_slice}"
+        if z_slice is not None else "Maximum dose projection along Z"
+    )
+    figure.suptitle(title or default_title)
     try:
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -225,18 +253,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     # An explicit shape is the escape hatch for missing or unparsable headers.
     lines = read_header(input_path) if args.shape is None else []
     shape = grid_shape(lines, args.shape)
-    z_index = select_z_slice(args.z_slice, shape[2])
+    z_index = select_z_slice(args.z_slice, shape[2]) if args.z_slice is not None else None
     output = output_path(input_path, args.output, args.z_slice, args.interactive)
-    plane = read_xy_slice(input_path, shape, z_index)
+    plane = read_xy_plane(input_path, shape, z_index)
     plot_xy(
         output, plane, args.z_slice, args.normalization, args.colormap,
         args.title, args.dpi, args.interactive,
     )
     print(f"Grid: X={shape[0]}, Y={shape[1]}, Z={shape[2]}")
+    description = (
+        f"Z slice {args.z_slice}"
+        if args.z_slice is not None else "maximum dose projection along Z"
+    )
     if output is not None:
-        print(f"Wrote X-Y dose plot for Z slice {args.z_slice}: {output}")
+        print(f"Wrote X-Y {description}: {output}")
     if args.interactive:
-        print(f"Closed interactive X-Y dose plot for Z slice {args.z_slice}")
+        print(f"Closed interactive X-Y {description}")
     return 0
 
 

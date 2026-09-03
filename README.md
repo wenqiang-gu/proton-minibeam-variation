@@ -87,7 +87,14 @@ The worker uses `/data/maia/$USER/Applications/TOPAS/opentopas-env.sh` unless
 very large dose files; verify disk, memory, and scheduler limits with smoke runs
 before submitting production.
 
-Plot an X-Y dose distribution at a one-based patient-grid Z slice:
+Plot the maximum dose projection along Z in the X-Y plane:
+
+```sh
+python Slurm/plot_dose_xy.py \
+  output/smoke/smoke_sw040_ctc300_shift000_angle045/Dose_chunk_001_of_001.bin
+```
+
+To plot a specific one-based patient-grid Z slice instead:
 
 ```sh
 python Slurm/plot_dose_xy.py \
@@ -96,14 +103,14 @@ python Slurm/plot_dose_xy.py \
 ```
 
 The script reads grid dimensions from the companion `.binheader`, uses voxel
-indices on the axes, and normalizes the selected slice maximum to 100% by
+indices on the axes, and normalizes the plotted map's maximum to 100% by
 default. Pass `--normalization none` to retain raw DoseToMedium values in Gy, or
 `--shape NX NY NZ` if dimensions cannot be parsed from the header.
 
 For an interactive window with zoom, pan, and coordinate inspection, run:
 
 ```sh
-python Slurm/plot_dose_xy.py DOSE.bin --z-slice 54 --interactive
+python Slurm/plot_dose_xy.py DOSE.bin --interactive
 ```
 
 Interactive-only mode does not write a PNG. Add `--output slice.png` to both
