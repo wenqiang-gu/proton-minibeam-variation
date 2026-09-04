@@ -328,6 +328,32 @@ g4_data_dir=$geant4_install/share/Geant4/data
     die "OpenTOPAS executable was not installed at $topas_executable"
 [[ -d $g4_data_dir ]] || die "Geant4 datasets were not installed at $g4_data_dir"
 
+geant4_core_library=$(find -L "$geant4_install" -type f \
+    -name 'libG4global.so*' -print -quit)
+[[ -n $geant4_core_library ]] || \
+    die "could not locate libG4global.so below $geant4_install"
+geant4_library_dir=$(dirname "$geant4_core_library")
+
+# Conda and CMake choose lib or lib64 according to the host platform. Build the
+# runtime path from directories that actually exist instead of assuming lib.
+runtime_library_dirs=()
+for library_dir in \
+        "$topas_install/lib" "$topas_install/lib64" \
+        "$geant4_library_dir" "$geant4_install/lib" "$geant4_install/lib64" \
+        "$gdcm_install/lib" "$gdcm_install/lib64" \
+        "$toolchain/lib" "$toolchain/lib64"; do
+    [[ -d $library_dir ]] || continue
+    already_added=0
+    for existing_dir in "${runtime_library_dirs[@]}"; do
+        if [[ $existing_dir == "$library_dir" ]]; then
+            already_added=1
+            break
+        fi
+    done
+    (( already_added == 1 )) || runtime_library_dirs+=("$library_dir")
+done
+runtime_library_path=$(IFS=:; printf '%s' "${runtime_library_dirs[*]}")
+
 qt_plugin_dir=
 qt_platform_plugin_dir=
 if [[ $with_qt == 1 ]]; then
@@ -346,8 +372,8 @@ mkdir -p "$wrapper_dir"
     printf 'export GDCM_ROOT=%q\n' "$gdcm_install"
     printf 'export TOPAS_G4_DATA_DIR=%q\n' "$g4_data_dir"
     printf 'export PATH=%q:%q:${PATH}\n' "$topas_install/bin" "$toolchain/bin"
-    printf 'export LD_LIBRARY_PATH=%q:%q:%q:%q${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\n' \
-        "$topas_install/lib" "$geant4_install/lib" "$gdcm_install/lib" "$toolchain/lib"
+    printf 'export LD_LIBRARY_PATH=%q${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\n' \
+        "$runtime_library_path"
     if [[ $with_qt == 1 ]]; then
         printf 'export QT_PLUGIN_PATH=%q\n' "$qt_plugin_dir"
         printf 'export QT_QPA_PLATFORM_PLUGIN_PATH=%q\n' "$qt_platform_plugin_dir"
