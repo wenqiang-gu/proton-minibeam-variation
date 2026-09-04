@@ -328,8 +328,8 @@ g4_data_dir=$geant4_install/share/Geant4/data
     die "OpenTOPAS executable was not installed at $topas_executable"
 [[ -d $g4_data_dir ]] || die "Geant4 datasets were not installed at $g4_data_dir"
 
-geant4_core_library=$(find -L "$geant4_install" -type f \
-    -name 'libG4global.so*' -print -quit)
+geant4_core_library=$(find "$geant4_install" \
+    \( -type f -o -type l \) -name 'libG4global.so*' -print -quit)
 [[ -n $geant4_core_library ]] || \
     die "could not locate libG4global.so below $geant4_install"
 geant4_library_dir=$(dirname "$geant4_core_library")
