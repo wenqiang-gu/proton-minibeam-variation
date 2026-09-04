@@ -1,4 +1,5 @@
 import copy
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,10 +57,13 @@ def synthetic_series(root, orientation):
 
 class GeneratorTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls): cls.config = g.load_config(ROOT / "study.toml")
+    def setUpClass(cls):
+        cls.config = g.load_config(ROOT / "study.toml")
+        cls.beam_path = ROOT / cls.config["beam"]["time_feature_file"]
+        cls.envelope = g.beam_envelope(cls.beam_path,cls.config)
 
     def test_default_matrix_and_apertures(self):
-        cases = g.cases(self.config, "smoke")
+        cases = g.cases(self.config, "smoke",self.envelope)
         sweep = g.table(self.config, "sweep")
         expected_cases = np.prod([len(sweep[key]) for key in ("slit_width_mm", "ctc_mm", "shift_fractions", "angles_deg")])
         expected_apertures = np.prod([len(sweep[key]) for key in ("slit_width_mm", "ctc_mm", "shift_fractions")])
@@ -67,19 +71,48 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(len({g.ap_name(x.aperture) for x in cases}), expected_apertures)
         a = g.table(self.config, "aperture")
         for case in cases:
-            self.assertLessEqual(case.aperture.count, 20)
+            self.assertLessEqual(case.aperture.count, self.config["aperture"]["max_slits"])
+            self.assertEqual(case.aperture.count % 2, 0)
             for x in case.aperture.positions:
                 self.assertLessEqual((abs(x)+case.width/2)**2+(a["slit_height_mm"]/2)**2, a["radius_mm"]**2+1e-9)
         output_directories = g.case_output_directories(ROOT, self.config, "smoke")
         self.assertEqual(len(output_directories), expected_cases)
         self.assertTrue(all(str(path).startswith(str(ROOT / "output/smoke")) for path in output_directories))
 
+    def test_one_sigma_envelope_and_even_counts(self):
+        self.assertEqual(self.envelope.sigma,1.0)
+        self.assertAlmostEqual(self.envelope.x_min,-23.3844558688)
+        self.assertAlmostEqual(self.envelope.x_max,22.4313947453)
+        self.assertAlmostEqual(self.envelope.y_min,-14.7053883720)
+        self.assertAlmostEqual(self.envelope.y_max,17.9603007820)
+        self.assertAlmostEqual(2*max(abs(self.envelope.y_min),abs(self.envelope.y_max)),35.9206015640)
+
+        config=copy.deepcopy(self.config)
+        config["sweep"]["slit_width_mm"]=[0.4]
+        config["sweep"]["ctc_mm"]=[3.0,5.0,7.0]
+        generated_cases=g.cases(config,"smoke",self.envelope)
+        counts={ctc:{case.aperture.count for case in generated_cases if case.ctc==ctc} for ctc in (3.0,5.0,7.0)}
+        self.assertEqual(counts,{3.0:{18},5.0:{14},7.0:{10}})
+        shifted=next(case for case in generated_cases if case.ctc==7.0 and case.shift==0.75)
+        low,high=g.slit_lattice_bounds(shifted.width,shifted.ctc,shifted.shift,shifted.aperture.count)
+        self.assertAlmostEqual(low,-26.45); self.assertAlmostEqual(high,36.95)
+        self.assertAlmostEqual(np.hypot(max(abs(low),abs(high)),18.0),41.1011252887)
+        zero=next(case for case in generated_cases if case.ctc==3.0 and case.shift==0.0)
+        half=next(case for case in generated_cases if case.ctc==3.0 and case.shift==0.5)
+        self.assertNotIn(0.0,zero.aperture.positions)
+        self.assertIn(0.0,half.aperture.positions)
+
+        with self.assertRaisesRegex(g.Error,"minimum centered height"):
+            g.slit_count(0.4,3.0,[0.0,0.25,0.5,0.75],45.0,20.0,18,self.envelope)
+        with self.assertRaisesRegex(g.Error,"does not cover"):
+            g.slit_count(0.4,3.0,[0.0,0.25,0.5,0.75],45.0,36.0,16,self.envelope)
+
     def test_per_angle_downstream_surface_distances(self):
         config = copy.deepcopy(self.config)
         config["sweep"]["angles_deg"] = [0.0, 45.0, 90.0]
-        config["aperture"]["downstream_surface_distance_mm"] = [100.0, 125.0, 150.0]
-        generated_cases = g.cases(config, "smoke")
-        expected = {0.0: 100.0, 45.0: 125.0, 90.0: 150.0}
+        config["aperture"]["downstream_surface_distance_mm"] = [180.0, 160.0, 140.0]
+        generated_cases = g.cases(config, "smoke",g.beam_envelope(self.beam_path,config))
+        expected = {0.0: 180.0, 45.0: 160.0, 90.0: 140.0}
         self.assertTrue(generated_cases)
         for case in generated_cases:
             self.assertEqual(case.downstream_surface_distance, expected[case.angle])
@@ -91,13 +124,12 @@ class GeneratorTests(unittest.TestCase):
         self.assertNotIn("Ge/Snout/TransZ", g.render_aperture(config, generated_cases[0].aperture))
 
         config["sweep"]["angles_deg"] = [45.0]
-        config["aperture"]["downstream_surface_distance_mm"] = [123.0]
-        single_angle_cases = g.cases(config, "smoke")
+        config["aperture"]["downstream_surface_distance_mm"] = [180.0]
+        single_angle_cases = g.cases(config, "smoke",g.beam_envelope(self.beam_path,config))
         self.assertTrue(all(case.angle == 45.0 for case in single_angle_cases))
-        self.assertTrue(all(case.downstream_surface_distance == 123.0 for case in single_angle_cases))
+        self.assertTrue(all(case.downstream_surface_distance == 180.0 for case in single_angle_cases))
 
     def test_downstream_surface_distance_array_validation(self):
-        original = "downstream_surface_distance_mm = [150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0]"
         invalid = {
             "scalar": ("downstream_surface_distance_mm = 150.0", "non-empty numeric array"),
             "empty": ("downstream_surface_distance_mm = []", "non-empty numeric array"),
@@ -108,12 +140,13 @@ class GeneratorTests(unittest.TestCase):
             "negative": ("downstream_surface_distance_mm = [-1.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0]", "values must be positive"),
         }
         source = (ROOT / "study.toml").read_text()
-        self.assertIn(original, source)
+        pattern = r"downstream_surface_distance_mm\s*=\s*\[[^\]]*\]"
+        self.assertEqual(len(re.findall(pattern,source,re.S)),1)
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "study.toml"
             for name, (replacement, message) in invalid.items():
                 with self.subTest(name=name):
-                    path.write_text(source.replace(original, replacement))
+                    path.write_text(re.sub(pattern,replacement,source,count=1,flags=re.S))
                     with self.assertRaisesRegex(g.Error, message):
                         g.load_config(path)
 
@@ -196,7 +229,7 @@ class GeneratorTests(unittest.TestCase):
 
     def test_source_nests_time_features_for_topas_39(self):
         source = g.render_source(self.config)
-        field = g.render_field(self.config, g.cases(self.config, "smoke")[0], "smoke")
+        field = g.render_field(self.config, g.cases(self.config, "smoke",self.envelope)[0], "smoke")
         self.assertIn("includeFile = reference/beam_1_2e5.txt", source)
         self.assertNotIn("includeFile = reference/beam_1_2e5.txt", field)
         self.assertLess(source.index("includeFile"), source.index("Ge/BeamPosition2/RotX"))
@@ -211,7 +244,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn('i:Gr/ShowOnlyOutlineIfVoxelCountExceeds = 20000000', rendered)
         self.assertIn('b:Gr/ViewA/IncludeTrajectories = "False"', rendered)
         self.assertIn('d:Gr/ViewA/AxesSize = 200 mm', rendered)
-        field = g.render_field(self.config, g.cases(self.config, "smoke")[0], "smoke")
+        field = g.render_field(self.config, g.cases(self.config, "smoke",self.envelope)[0], "smoke")
         self.assertNotIn('Gr/ViewA', field)
         self.assertNotIn('BeamPosition20', field)
         vis_test = g.render_vis_test(self.config, "generated/smoke/tasks/example.txt")
@@ -238,7 +271,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn('iv:Ge/Patient/ShowSpecificSlicesZ = 1 54', vis_test)
         task, _, _ = g.render_task(
             self.config,
-            g.cases(self.config, "smoke")[0],
+            g.cases(self.config, "smoke",self.envelope)[0],
             "smoke",
             1,
             1,

@@ -14,7 +14,7 @@ crop_z_voxels = [0, 0]
 
 [sweep]
 slit_width_mm = [0.4] #, 0.6, 0.8]
-ctc_mm = [3.0] #, 5.0, 7.0] # [3.0, 4.0, 5.0, 6.0, 7.0]
+ctc_mm = [3.0] # , 5.0, 7.0] # [3.0, 4.0, 5.0, 6.0, 7.0]
 angles_deg = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]
 shift_fractions = [0.0, 0.25, 0.5, 0.75]
 
@@ -22,13 +22,10 @@ shift_fractions = [0.0, 0.25, 0.5, 0.75]
 radius_mm = 45.0
 snout_radius_mm = 60.0
 thickness_mm = 60.0
-slit_height_mm = 20.0
-max_slits = 20
+slit_height_mm = 36.0
+max_slits = 18
 # One distance per sweep.angles_deg entry, in the same order.
-downstream_surface_distance_mm = [
-    180.0, 160.0, 140.0, 135.0, 
-    130.0, 128.0, 130.0, 152.0
-]
+downstream_surface_distance_mm = [180.0, 160.0, 140.0, 135.0, 130.0, 128.0, 130.0, 152.0]
 
 [beam]
 time_feature_file = "reference/beam_1_2e5.txt"

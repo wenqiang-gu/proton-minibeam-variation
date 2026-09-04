@@ -157,9 +157,15 @@ remain numbered in the original DICOM series and are remapped automatically.
 Cropping changes the simulated patient geometry: use enough margin to retain
 material relevant to the beam path and scattered particles.
 
-The brass aperture stays 45 mm in radius and 60 mm thick; slits are 20 mm high.
-For each width/CTC pair, the largest count up to 20 that fits at every shift is
-used, keeping phase comparisons at a common slit count.
+The brass aperture stays 45 mm in radius and 60 mm thick; the configured slits
+are 36 mm high. The generator transports each spot's L9-L14 Gaussian phase
+space from the source to both aperture faces and requires the slit lattice to
+span the combined one-sigma X/Y envelope. For each width/CTC pair, it selects
+the largest even count up to `max_slits` that fits inside the circular aperture
+at every shift. The current 0.4 mm-width designs use 18, 14, and 10 slits for
+3, 5, and 7 mm CTC respectively. At zero shift an even lattice leaves brass at
+X=0; a 50% CTC shift moves a slit onto X=0. Coverage bounds and limiting-corner
+margins are recorded in `summary.json`.
 
 ## Run TOPAS and Slurm
 

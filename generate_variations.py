@@ -58,6 +58,13 @@ class Crop:
 
 
 @dataclass(frozen=True)
+class BeamEnvelope:
+    sigma: float
+    x_min: float; x_max: float
+    y_min: float; y_max: float
+
+
+@dataclass(frozen=True)
 class Aperture:
     width: float; ctc: float; shift: float; count: int
     positions: tuple[float, ...]
@@ -239,7 +246,7 @@ def patient_crop(c,ct,center=None):
 
 
 VECTOR_RE=re.compile(r"^[diu]v:Tf/Scatterer1/L(?P<n>\d+)/Values\s*=\s*(?P<v>.*?)\s*$",re.M)
-def beam_histories(path: Path, spots: int) -> list[int]:
+def beam_vector_tokens(path: Path, spots: int) -> dict[int,list[str]]:
     try: text=path.read_text()
     except OSError as e: raise Error(f"cannot read beam file: {e}") from e
     vectors={int(m.group("n")):m.group("v").split() for m in VECTOR_RE.finditer(text)}
@@ -248,24 +255,110 @@ def beam_histories(path: Path, spots: int) -> list[int]:
         values=tokens[1:]
         if len(values)==spots+1 and re.fullmatch(r"[A-Za-z]+",values[-1]): values.pop()
         if int(tokens[0])!=spots or len(values)!=spots: raise Error(f"beam L{n} does not contain {spots} values")
-    try: out=[int(x) for x in vectors[4][1:]]
+        vectors[n]=values
+    return vectors
+
+
+def beam_histories(path: Path, spots: int) -> list[int]:
+    vectors=beam_vector_tokens(path,spots)
+    try: out=[int(x) for x in vectors[4]]
     except ValueError as e: raise Error("beam L4 histories are not integers") from e
     if any(x<=0 for x in out): raise Error("beam histories must be positive")
     return out
 
 
-def slit_count(width,ctc,shifts,radius,height,maximum):
-    for count in range(maximum,0,-1):
+def beam_envelope(path: Path,c: dict[str,Any],sigma=1.0) -> BeamEnvelope:
+    spots=integer(table(c,"beam"),"spot_count"); tokens=beam_vector_tokens(path,spots)
+    try: vectors={n:np.asarray([float(x) for x in tokens[n]],dtype=float) for n in range(5,15)}
+    except ValueError as e: raise Error("beam L5-L14 values must be numeric") from e
+    if any(not np.all(np.isfinite(values)) for values in vectors.values()): raise Error("beam L5-L14 values must be finite")
+    if np.any(vectors[9]<=0) or np.any(vectors[12]<=0): raise Error("beam position sigmas L9 and L12 must be positive")
+    if np.any(vectors[10]<0) or np.any(vectors[13]<0): raise Error("beam angular sigmas L10 and L13 must be nonnegative")
+    if np.any(np.abs(vectors[11])>1) or np.any(np.abs(vectors[14])>1): raise Error("beam correlations L11 and L14 must be between -1 and 1")
+    if np.any(vectors[7]!=0) or np.any(vectors[8]!=0): raise Error("aperture coverage validation currently requires zero beam rotations in L7 and L8")
+    beam=table(c,"beam"); aperture=table(c,"aperture"); source=num(beam,"source_distance_mm"); thickness=num(aperture,"thickness_mm")
+    distances=nums(aperture,"downstream_surface_distance_mm",False)
+    propagation=[]
+    for distance in distances:
+        upstream=source-distance-thickness; downstream=source-distance
+        if upstream<0: raise Error("source_distance_mm must place the source upstream of the complete aperture")
+        propagation.extend((upstream,downstream))
+    center_x=-vectors[5]; center_y=vectors[6]; bounds_x=[]; bounds_y=[]
+    for distance in propagation:
+        var_x=vectors[9]**2+2*vectors[11]*vectors[9]*vectors[10]*distance+(vectors[10]*distance)**2
+        var_y=vectors[12]**2+2*vectors[14]*vectors[12]*vectors[13]*distance+(vectors[13]*distance)**2
+        if np.any(var_x<0) or np.any(var_y<0): raise Error("beam phase-space parameters produce a negative propagated variance")
+        spread_x=np.sqrt(var_x); spread_y=np.sqrt(var_y)
+        bounds_x.extend((float(np.min(center_x-sigma*spread_x)),float(np.max(center_x+sigma*spread_x))))
+        bounds_y.extend((float(np.min(center_y-sigma*spread_y)),float(np.max(center_y+sigma*spread_y))))
+    return BeamEnvelope(sigma,min(bounds_x),max(bounds_x),min(bounds_y),max(bounds_y))
+
+
+def slit_lattice_bounds(width,ctc,shift,count):
+    mid=(count-1)/2
+    return -mid*ctc+shift*ctc-width/2,mid*ctc+shift*ctc+width/2
+
+
+def slit_count(width,ctc,shifts,radius,height,maximum,envelope):
+    required_half_height=max(abs(envelope.y_min),abs(envelope.y_max))
+    if height/2+1e-9<required_half_height:
+        raise Error(
+            f"slit_height_mm={fmt(height)} does not cover the {fmt(envelope.sigma)} sigma Y envelope "
+            f"[{fmt(envelope.y_min)}, {fmt(envelope.y_max)}] mm; minimum centered height is {fmt(2*required_half_height)} mm"
+        )
+    even_max=maximum if maximum%2==0 else maximum-1
+    if even_max<2: raise Error("max_slits must allow at least two slits when even slit counts are required")
+    selected=None
+    for count in range(even_max,1,-2):
         mid=(count-1)/2
-        if all((abs((i-mid)*ctc+s*ctc)+width/2)**2+(height/2)**2 <= radius**2+1e-9 for s in shifts for i in range(count)): return count
-    raise Error("no slit fits the configured aperture")
+        if all((abs((i-mid)*ctc+s*ctc)+width/2)**2+(height/2)**2 <= radius**2+1e-9 for s in shifts for i in range(count)):
+            selected=count; break
+    if selected is None:
+        required_radius=max(math.hypot(max(abs(x) for x in slit_lattice_bounds(width,ctc,shift,2)),height/2) for shift in shifts)
+        raise Error(f"no positive even slit count up to max_slits={maximum} fits radius_mm={fmt(radius)}; at least {fmt(required_radius)} mm is required for two slits")
+    uncovered=[]
+    for shift in shifts:
+        low,high=slit_lattice_bounds(width,ctc,shift,selected)
+        if low>envelope.x_min+1e-9 or high<envelope.x_max-1e-9: uncovered.append(shift)
+    if uncovered:
+        required=2
+        while True:
+            count=required
+            if all(slit_lattice_bounds(width,ctc,shift,count)[0]<=envelope.x_min+1e-9 and slit_lattice_bounds(width,ctc,shift,count)[1]>=envelope.x_max-1e-9 for shift in shifts):
+                break
+            required+=2
+        required_radius=max(math.hypot(max(abs(x) for x in slit_lattice_bounds(width,ctc,shift,required)),height/2) for shift in shifts)
+        raise Error(
+            f"slit lattice for width={fmt(width)} mm and CTC={fmt(ctc)} mm does not cover the "
+            f"{fmt(envelope.sigma)} sigma X envelope [{fmt(envelope.x_min)}, {fmt(envelope.x_max)}] mm "
+            f"for shifts {', '.join(fmt(x) for x in uncovered)}; minimum spanning design requires "
+            f"{required} even slits, max_slits >= {required}, and radius_mm >= {fmt(required_radius)}"
+        )
+    return selected
 
 
-def cases(c,profile):
+def aperture_design_metrics(c,width,ctc,count,envelope):
+    a=table(c,"aperture"); shifts=nums(table(c,"sweep"),"shift_fractions"); height=num(a,"slit_height_mm"); radius=num(a,"radius_mm")
+    rows=[]
+    for shift in shifts:
+        low,high=slit_lattice_bounds(width,ctc,shift,count)
+        corner=math.hypot(max(abs(low),abs(high)),height/2)
+        rows.append((shift,low,high,corner))
+    limiting=max(rows,key=lambda row:row[3])
+    return dict(
+        slit_width_mm=width,ctc_mm=ctc,slit_count=count,
+        limiting_shift_fraction=limiting[0],maximum_corner_radius_mm=limiting[3],
+        radial_clearance_mm=radius-limiting[3],
+        minimum_x_coverage_margin_mm=min(min(envelope.x_min-low,high-envelope.x_max) for _,low,high,_ in rows),
+        y_coverage_margin_mm=height/2-max(abs(envelope.y_min),abs(envelope.y_max)),
+    )
+
+
+def cases(c,profile,envelope):
     s,a=table(c,"sweep"),table(c,"aperture"); ws,ds,ss,angles=nums(s,"slit_width_mm"),nums(s,"ctc_mm"),nums(s,"shift_fractions"),nums(s,"angles_deg")
     distances=nums(a,"downstream_surface_distance_mm",False)
     distance_by_angle=dict(zip(angles,distances))
-    counts={(w,d):slit_count(w,d,ss,num(a,"radius_mm"),num(a,"slit_height_mm"),integer(a,"max_slits")) for w,d in product(ws,ds)}; out=[]
+    counts={(w,d):slit_count(w,d,ss,num(a,"radius_mm"),num(a,"slit_height_mm"),integer(a,"max_slits"),envelope) for w,d in product(ws,ds)}; out=[]
     for w,d,shift,angle in product(ws,ds,ss,angles):
         count=counts[w,d]; mid=(count-1)/2; ap=Aperture(w,d,shift,count,tuple((i-mid)*d+shift*d for i in range(count)))
         ident=f"{profile}_sw{round(w*100):03d}_ctc{round(d*100):03d}_shift{round(shift*100):03d}_angle{round(angle)%360:03d}"
@@ -477,8 +570,8 @@ s:Sc/PatientDose/SeriesDescription = "{case.case_id} {suffix}"
     return text,output.as_posix(),sd
 
 
-def build_tree(dest,root,c,profile,ct,center,production):
-    histories,chunks=profile_data(c,profile,production); chunks_data=split_histories(histories,chunks); all_cases=cases(c,profile)
+def build_tree(dest,root,c,profile,ct,center,production,envelope):
+    histories,chunks=profile_data(c,profile,production); chunks_data=split_histories(histories,chunks); all_cases=cases(c,profile,envelope)
     crop=patient_crop(c,ct,center); slices=table(c,"visualization")["slices_z"]; first_z=int(crop.low[2]+1); last_z=int(len(ct.origins)-crop.high[2])
     if any(x<first_z or x>last_z for x in slices): raise Error(f"visualization.slices_z must be within retained original DICOM slices {first_z} to {last_z}")
     write(dest/'common/patient.txt',render_patient(c,ct,center)); write(dest/'common/source.txt',render_source(c))
@@ -496,7 +589,11 @@ def build_tree(dest,root,c,profile,ct,center,production):
     (dest/'manifest.csv').parent.mkdir(parents=True,exist_ok=True)
     with (dest/'manifest.csv').open('w',newline='') as f: w=csv.DictWriter(f,fieldnames=list(records[0])); w.writeheader(); w.writerows(records)
     spacing=np.array([ct.col_spacing,ct.row_spacing,ct.slice_spacing]); cropped_local=center.local-crop.low*spacing; source_shape=np.array([ct.cols,ct.rows,len(ct.origins)]); retained_min=crop.low+1; retained_max=source_shape-crop.high
-    summary=dict(profile=profile,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,source_ct_shape=source_shape.tolist(),ct_shape=crop.shape.tolist(),ct_crop_voxels=dict(x=[int(x) for x in (crop.low[0],crop.high[0])],y=[int(x) for x in (crop.low[1],crop.high[1])],z=[int(x) for x in (crop.low[2],crop.high[2])]),ct_retained_bounds_one_based=dict(x=[int(retained_min[0]),int(retained_max[0])],y=[int(retained_min[1]),int(retained_max[1])],z=[int(retained_min[2]),int(retained_max[2])]),ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=cropped_local.tolist())
+    designs=[]
+    for width,ctc in product(nums(table(c,"sweep"),"slit_width_mm"),nums(table(c,"sweep"),"ctc_mm")):
+        count=next(case.aperture.count for case in all_cases if case.width==width and case.ctc==ctc)
+        designs.append(aperture_design_metrics(c,width,ctc,count,envelope))
+    summary=dict(profile=profile,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,beam_envelope_sigma=envelope.sigma,aperture_beam_envelope_mm=dict(x=[envelope.x_min,envelope.x_max],y=[envelope.y_min,envelope.y_max]),aperture_designs=designs,source_ct_shape=source_shape.tolist(),ct_shape=crop.shape.tolist(),ct_crop_voxels=dict(x=[int(x) for x in (crop.low[0],crop.high[0])],y=[int(x) for x in (crop.low[1],crop.high[1])],z=[int(x) for x in (crop.low[2],crop.high[2])]),ct_retained_bounds_one_based=dict(x=[int(retained_min[0]),int(retained_max[0])],y=[int(retained_min[1]),int(retained_max[1])],z=[int(retained_min[2]),int(retained_max[2])]),ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=cropped_local.tolist())
     write(dest/'summary.json',json.dumps(summary,indent=2)+"\n"); return len(all_cases),len(records)
 
 
@@ -507,16 +604,18 @@ def differences(expected,actual):
     return out
 
 
-def case_output_directories(root,c,profile):
+def case_output_directories(root,c,profile,envelope=None):
     root=root.resolve(); output_root=(root/table(c,"study")["output_directory"]).resolve()
     try: output_root.relative_to(root)
     except ValueError as e: raise Error("output_directory must be inside the project root") from e
     if output_root==root: raise Error("output_directory cannot be the project root")
-    return [output_root/profile/case.case_id for case in cases(c,profile)]
+    if envelope is None:
+        beam=table(c,"beam"); envelope=beam_envelope((root/beam["time_feature_file"]).resolve(),c)
+    return [output_root/profile/case.case_id for case in cases(c,profile,envelope)]
 
 
-def ensure_output_directories(root,c,profile):
-    directories=case_output_directories(root,c,profile)
+def ensure_output_directories(root,c,profile,envelope=None):
+    directories=case_output_directories(root,c,profile,envelope)
     for directory in directories: directory.mkdir(parents=True,exist_ok=True)
     return directories
 
@@ -534,20 +633,20 @@ def execute(config_path,profile,check=False,force=False,clean=False):
         else: print(f"Nothing to remove: {target}")
         return 0
     p=table(c,"patient"); ct=read_ct((root/p["dicom_directory"]).resolve()); center=roi_center(ct,(root/p["rtstruct"]).resolve(),str(p["roi_name"]))
-    b=table(c,"beam"); production=beam_histories((root/b["time_feature_file"]).resolve(),integer(b,"spot_count"))
+    b=table(c,"beam"); beam_path=(root/b["time_feature_file"]).resolve(); production=beam_histories(beam_path,integer(b,"spot_count")); envelope=beam_envelope(beam_path,c)
     generated.mkdir(parents=True,exist_ok=True); temporary: Path|None=Path(tempfile.mkdtemp(prefix=f'.{profile}.',dir=generated))
     try:
-        count,tasks=build_tree(temporary,root,c,profile,ct,center,production); diff=differences(temporary,target)
+        count,tasks=build_tree(temporary,root,c,profile,ct,center,production,envelope); diff=differences(temporary,target)
         if check:
-            missing_outputs=[path for path in case_output_directories(root,c,profile) if not path.is_dir()]
+            missing_outputs=[path for path in case_output_directories(root,c,profile,envelope) if not path.is_dir()]
             if missing_outputs: diff.append(f"missing output directories: {len(missing_outputs)}")
             if diff: raise Error("generated profile is not current:\n  "+"\n  ".join(diff[:20]))
             print(f"Validated {count} fields and {tasks} tasks in {target}"); return 0
         if target.exists() and diff and not force: raise Error(f"{target} is stale; rerun with --force")
         if target.exists() and not diff:
-            ensure_output_directories(root,c,profile); print(f"Already current: {target}"); return 0
+            ensure_output_directories(root,c,profile,envelope); print(f"Already current: {target}"); return 0
         if target.exists(): shutil.rmtree(target)
-        os.replace(temporary,target); temporary=None; ensure_output_directories(root,c,profile)
+        os.replace(temporary,target); temporary=None; ensure_output_directories(root,c,profile,envelope)
         print(f"Generated {count} independent fields and {tasks} runnable tasks in {target}")
         print("PTV centroid (patient XYZ mm): "+", ".join(f"{x:.5f}" for x in center.patient)); return 0
     finally:
