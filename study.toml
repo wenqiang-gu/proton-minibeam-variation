@@ -63,5 +63,5 @@ chunks = 1
 
 [profiles.production]
 history_mode = "scaled"
-history_scale = 1.0
+history_scale = 0.05
 chunks = 50

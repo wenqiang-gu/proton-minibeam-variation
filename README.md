@@ -20,6 +20,17 @@ python -m pip install -r requirements.txt
 The local `dicom_9306087_fine` directory must contain the CT series and
 `RTSTRUCT.dcm`. Patient data are ignored by Git and never modified.
 
+To build a private OpenTOPAS installation on BioHPC, where Conda is already
+initialized, run:
+
+```sh
+Slurm/install_opentopas.sh
+source "$HOME/Applications/TOPAS/opentopas-env.sh"
+```
+
+The installer enables Qt/OpenGL by default. Use `--headless` on systems where
+only batch simulation is needed, or `--prefix DIR` to select another location.
+
 ## Generate and validate
 
 ```sh
