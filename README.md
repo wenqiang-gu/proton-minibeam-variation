@@ -98,6 +98,26 @@ The worker uses `/data/maia/$USER/Applications/TOPAS/opentopas-env.sh` unless
 very large dose files; verify disk, memory, and scheduler limits with smoke runs
 before submitting production.
 
+Combine each field's available binary chunks independently:
+
+```sh
+python Slurm/combine_dose_chunks.py --profile production
+```
+
+Complete fields produce `Dose_combined.bin`; fields with missing or invalid
+chunks produce a clearly labeled `Dose_partial_K_of_N.bin`. Both receive a
+companion `.binheader` in the same field directory. Inspect everything without
+writing output, or replace an existing combined result, with:
+
+```sh
+python Slurm/combine_dose_chunks.py --profile production --validate-only
+python Slurm/combine_dose_chunks.py --profile production --overwrite
+```
+
+Combination is an element-wise sum with no history normalization. The generated
+profile manifest determines the expected fields and chunks. Invalid fields are
+reported without preventing other fields from being processed.
+
 Plot the maximum dose projection along Z in the X-Y plane:
 
 ```sh
