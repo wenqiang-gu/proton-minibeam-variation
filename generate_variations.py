@@ -42,6 +42,19 @@ class Center:
     patient: np.ndarray
     local: np.ndarray
     voxels: int
+    index_min: np.ndarray
+    index_max: np.ndarray
+
+
+@dataclass(frozen=True)
+class Crop:
+    low: np.ndarray
+    high: np.ndarray
+    shape: np.ndarray
+
+    @property
+    def active(self):
+        return bool(np.any(self.low) or np.any(self.high))
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,7 @@ class Aperture:
 @dataclass(frozen=True)
 class Case:
     case_id: str; width: float; ctc: float; shift: float; angle: float
+    downstream_surface_distance: float
     aperture: Aperture
 
 
@@ -99,7 +113,13 @@ def load_config(path: Path) -> dict[str, Any]:
     if any(x <= 0 for x in widths+ctcs) or any(w >= d for w in widths for d in ctcs): raise Error("widths must be positive and smaller than every CTC")
     if any(x < 0 or x >= 1 for x in shifts): raise Error("shifts must satisfy 0 <= shift < 1")
     if num(a,"snout_radius_mm") < num(a,"radius_mm"): raise Error("snout radius must cover aperture")
-    for k in ("thickness_mm","slit_height_mm","downstream_surface_distance_mm"): num(a,k)
+    for k in ("thickness_mm","slit_height_mm"): num(a,k)
+    distances=nums(a,"downstream_surface_distance_mm",False)
+    angles=nums(s,"angles_deg")
+    if len(distances) != len(angles):
+        raise Error("aperture.downstream_surface_distance_mm must have the same length as sweep.angles_deg")
+    if any(x <= 0 for x in distances):
+        raise Error("aperture.downstream_surface_distance_mm values must be positive")
     integer(a,"max_slits"); integer(b,"spot_count"); num(b,"source_distance_mm")
     if len(nums(sc,"voxel_size_mm",False)) != 3: raise Error("voxel_size_mm needs X, Y, Z")
     integer(top,"threads"); integer(top,"show_history_interval")
@@ -122,6 +142,10 @@ def load_config(path: Path) -> dict[str, Any]:
     for key in ("zoom","axes_size_mm"): num(view,key)
     p=table(c,"patient")
     if not isinstance(p.get("frame_rotation_deg"),list) or len(p["frame_rotation_deg"]) != 3: raise Error("frame_rotation_deg needs three values")
+    for key in ("crop_x_voxels","crop_y_voxels","crop_z_voxels"):
+        crop=p.get(key,[0,0])
+        if not isinstance(crop,list) or len(crop)!=2 or any(isinstance(x,bool) or not isinstance(x,int) or x<0 for x in crop):
+            raise Error(f"patient.{key} must contain two nonnegative integers")
     for name,pf in table(c,"profiles").items():
         if not re.fullmatch(r"[A-Za-z0-9_-]+",name): raise Error(f"unsafe profile name {name!r}")
         if pf.get("history_mode") not in ("uniform","scaled"): raise Error(f"invalid history mode in {name}")
@@ -183,14 +207,35 @@ def roi_center(ct: CT, rt_path: Path, roi_name: str) -> Center:
         delta=pts-ct.origins[z]; cc=delta@ct.col_dir/ct.col_spacing; rr=delta@ct.row_dir/ct.row_spacing
         r,cx=polygon(rr,cc,(ct.rows,ct.cols)); cm=np.zeros((ct.rows,ct.cols),bool); cm[r,cx]=True
         masks.setdefault(z,np.zeros_like(cm)); masks[z]^=cm
-    count=0; ps=np.zeros(3); ls=np.zeros(3)
+    count=0; ps=np.zeros(3); ls=np.zeros(3); index_min=np.array([ct.cols,ct.rows,len(ct.origins)]); index_max=np.full(3,-1)
     for z,mask in masks.items():
         rr,cc=np.nonzero(mask); n=len(rr)
         count+=n
         ps += (ct.origins[z]+cc[:,None]*ct.col_spacing*ct.col_dir+rr[:,None]*ct.row_spacing*ct.row_dir).sum(axis=0)
         ls += [((cc+.5)*ct.col_spacing).sum(),((rr+.5)*ct.row_spacing).sum(),n*(z+.5)*ct.slice_spacing]
+        if n:
+            index_min=np.minimum(index_min,[cc.min(),rr.min(),z]); index_max=np.maximum(index_max,[cc.max(),rr.max(),z])
     if not count: raise Error(f"ROI {roi_name!r} rasterized to zero voxels")
-    return Center(ps/count,ls/count,count)
+    return Center(ps/count,ls/count,count,index_min,index_max)
+
+
+def patient_crop(c,ct,center=None):
+    p=table(c,"patient")
+    low=np.array([p.get(f"crop_{axis}_voxels",[0,0])[0] for axis in "xyz"],dtype=int)
+    high=np.array([p.get(f"crop_{axis}_voxels",[0,0])[1] for axis in "xyz"],dtype=int)
+    source_shape=np.array([ct.cols,ct.rows,len(ct.origins)],dtype=int); shape=source_shape-low-high
+    if np.any(shape<=0):
+        axis="XYZ"[int(np.flatnonzero(shape<=0)[0])]
+        raise Error(f"patient crop removes the entire {axis} axis")
+    crop=Crop(low,high,shape)
+    if center is not None and (np.any(center.index_min<low) or np.any(center.index_max>=source_shape-high)):
+        raise Error(
+            "patient crop removes voxels from the configured ROI; ROI bounds are "
+            f"X={center.index_min[0]+1}-{center.index_max[0]+1}, "
+            f"Y={center.index_min[1]+1}-{center.index_max[1]+1}, "
+            f"Z={center.index_min[2]+1}-{center.index_max[2]+1} (one-based)"
+        )
+    return crop
 
 
 VECTOR_RE=re.compile(r"^[diu]v:Tf/Scatterer1/L(?P<n>\d+)/Values\s*=\s*(?P<v>.*?)\s*$",re.M)
@@ -218,11 +263,13 @@ def slit_count(width,ctc,shifts,radius,height,maximum):
 
 def cases(c,profile):
     s,a=table(c,"sweep"),table(c,"aperture"); ws,ds,ss,angles=nums(s,"slit_width_mm"),nums(s,"ctc_mm"),nums(s,"shift_fractions"),nums(s,"angles_deg")
+    distances=nums(a,"downstream_surface_distance_mm",False)
+    distance_by_angle=dict(zip(angles,distances))
     counts={(w,d):slit_count(w,d,ss,num(a,"radius_mm"),num(a,"slit_height_mm"),integer(a,"max_slits")) for w,d in product(ws,ds)}; out=[]
     for w,d,shift,angle in product(ws,ds,ss,angles):
         count=counts[w,d]; mid=(count-1)/2; ap=Aperture(w,d,shift,count,tuple((i-mid)*d+shift*d for i in range(count)))
         ident=f"{profile}_sw{round(w*100):03d}_ctc{round(d*100):03d}_shift{round(shift*100):03d}_angle{round(angle)%360:03d}"
-        out.append(Case(ident,w,d,shift,angle,ap))
+        out.append(Case(ident,w,d,shift,angle,distance_by_angle[angle],ap))
     if len(out)!=len({x.case_id for x in out}): raise Error("case IDs collide at encoded precision")
     return out
 
@@ -254,7 +301,15 @@ def ap_name(ap): return f"sw{round(ap.width*100):03d}_ctc{round(ap.ctc*100):03d}
 
 
 def render_patient(c,ct,center):
-    p,sc=table(c,"patient"),table(c,"scoring"); trans=ct.size/2-center.local; rot=p["frame_rotation_deg"]; vox=nums(sc,"voxel_size_mm",False)
+    p,sc=table(c,"patient"),table(c,"scoring"); crop=patient_crop(c,ct,center); spacing=np.array([ct.col_spacing,ct.row_spacing,ct.slice_spacing]); cropped_size=crop.shape*spacing; cropped_local=center.local-crop.low*spacing; trans=cropped_size/2-cropped_local; rot=p["frame_rotation_deg"]; vox=nums(sc,"voxel_size_mm",False)
+    restrictions=""
+    if crop.active:
+        maximum=np.array([ct.cols,ct.rows,len(ct.origins)])-crop.high
+        restrictions="\n".join(
+            f"i:Ge/Patient/RestrictVoxels{axis}Min = {crop.low[i]+1}\n"
+            f"i:Ge/Patient/RestrictVoxels{axis}Max = {maximum[i]}"
+            for i,axis in enumerate("XYZ")
+        )+"\n"
     return f'''# Generated; do not edit. PTV patient XYZ = {" ".join(fmt(x) for x in center.patient)} mm
 s:Ge/PatientFrame/Parent = "World"
 s:Ge/PatientFrame/Type = "Group"
@@ -271,7 +326,7 @@ d:Ge/Patient/TransY = {fmt(trans[1])} mm
 d:Ge/Patient/TransZ = {fmt(trans[2])} mm
 b:Ge/Patient/SchneiderUseVariableDensityMaterials = "True"
 includeFile = reference/HUtoMaterialSchneider.txt
-dv:Ge/Patient/CloneRTDoseGridSize = 3 {fmt(vox[0])} {fmt(vox[1])} {fmt(vox[2])} mm
+{restrictions}dv:Ge/Patient/CloneRTDoseGridSize = 3 {fmt(vox[0])} {fmt(vox[1])} {fmt(vox[2])} mm
 '''
 
 
@@ -305,10 +360,9 @@ i:So/ProtonSource/NumberOfHistoriesInRun = Tf/Scatterer1/L4/Value
 
 def render_aperture(c,ap):
     a=table(c,"aperture"); radius=num(a,"radius_mm"); snout=num(a,"snout_radius_mm"); half=num(a,"thickness_mm")/2; hh=num(a,"slit_height_mm")/2
-    z=-(num(a,"downstream_surface_distance_mm")+half)
     lines=["# Generated fixed-radius aperture; do not edit.",f"# width={fmt(ap.width)} ctc={fmt(ap.ctc)} shift={fmt(ap.shift)} slits={ap.count}",
       's:Ge/Snout/Parent = "Gantry"','s:Ge/Snout/Type = "TsCylinder"','s:Ge/Snout/Material = "Air"',
-      'd:Ge/Snout/RMin = 0 mm',f'd:Ge/Snout/RMax = {fmt(snout)} mm',f'd:Ge/Snout/HL = {fmt(half)} mm','d:Ge/Snout/SPhi = 0 deg','d:Ge/Snout/DPhi = 360 deg',f'd:Ge/Snout/TransZ = {fmt(z)} mm',
+      'd:Ge/Snout/RMin = 0 mm',f'd:Ge/Snout/RMax = {fmt(snout)} mm',f'd:Ge/Snout/HL = {fmt(half)} mm','d:Ge/Snout/SPhi = 0 deg','d:Ge/Snout/DPhi = 360 deg',
       's:Ge/Aperture/Parent = "Snout"','s:Ge/Aperture/Type = "TsCylinder"','s:Ge/Aperture/Material = "Brass"','d:Ge/Aperture/RMin = 0 mm',f'd:Ge/Aperture/RMax = {fmt(radius)} mm',f'd:Ge/Aperture/HL = {fmt(half)} mm','d:Ge/Aperture/SPhi = 0 deg','d:Ge/Aperture/DPhi = 360 deg']
     for n,x in enumerate(ap.positions,1):
         p=f"Ge/Aperture/Slit{n:02d}"; hw=ap.width/2
@@ -340,10 +394,29 @@ d:Gr/ViewA/AxesSize = {fmt(view["axes_size_mm"])} mm
 '''
 
 
-def render_vis_test(c,task_path):
-    slices=table(c,"visualization")["slices_z"]
+def render_vis_test(c,task_path,z_crop_low=0):
+    slices=[x-z_crop_low for x in table(c,"visualization")["slices_z"]]
     return f'''# Generated standalone visualization input; do not use for dose production.
 includeFile = {task_path}
+
+# Use a coarse visualization-only dose grid to reduce memory usage. The scorer
+# remains disabled below, and production tasks retain the configured dose grid.
+dv:Ge/Patient/CloneRTDoseGridSize = 3 10 10 10 mm
+
+# Visualization-only marker for the otherwise invisible proton source group.
+s:Ge/BeamPosition20/Parent = "BeamPosition2"
+s:Ge/BeamPosition20/Type = "TsBox"
+s:Ge/BeamPosition20/Material = "Air"
+d:Ge/BeamPosition20/HLX = 10 mm
+d:Ge/BeamPosition20/HLY = 10 mm
+d:Ge/BeamPosition20/HLZ = 20 mm
+d:Ge/BeamPosition20/TransX = 0 mm
+d:Ge/BeamPosition20/TransY = 0 mm
+d:Ge/BeamPosition20/TransZ = 0 mm
+d:Ge/BeamPosition20/RotX = 0 deg
+d:Ge/BeamPosition20/RotY = 0 deg
+d:Ge/BeamPosition20/RotZ = 0 deg
+s:Ge/BeamPosition20/Color = "white"
 
 b:Ge/QuitIfOverlapDetected = "False"
 i:Ts/NumberOfThreads = 1
@@ -362,6 +435,7 @@ iv:Ge/Patient/ShowSpecificSlicesZ = {len(slices)} {" ".join(map(str,slices))}
 def render_field(c,case,profile):
     study,beam,top,sc=table(c,"study"),table(c,"beam"),table(c,"topas"),table(c,"scoring"); base=Path(study["generated_directory"])/profile
     modules=" ".join(f'"{x}"' for x in top["physics_modules"]); spots=integer(beam,"spot_count")
+    snout_z=-(case.downstream_surface_distance+num(table(c,"aperture"),"thickness_mm")/2)
     return f'''# Generated field {case.case_id}; do not edit.
 s:Ge/World/Material = "Air"
 d:Ge/World/HLX = 2 m
@@ -377,6 +451,7 @@ s:Ge/Gantry/Parent = "World"
 s:Ge/Gantry/Type = "Group"
 d:Ge/Gantry/RotY = -1.0 * Ge/FieldAngle deg
 includeFile = {(base/'common/patient.txt').as_posix()}
+d:Ge/Snout/TransZ = {fmt(snout_z)} mm
 includeFile = {(base/'apertures'/ap_name(case.aperture)).as_posix()}
 includeFile = {(base/'common/source.txt').as_posix()}
 s:Sc/PatientDose/Quantity = "DoseToMedium"
@@ -404,8 +479,8 @@ s:Sc/PatientDose/SeriesDescription = "{case.case_id} {suffix}"
 
 def build_tree(dest,root,c,profile,ct,center,production):
     histories,chunks=profile_data(c,profile,production); chunks_data=split_histories(histories,chunks); all_cases=cases(c,profile)
-    slices=table(c,"visualization")["slices_z"]
-    if any(x>len(ct.origins) for x in slices): raise Error(f"visualization.slices_z must be between 1 and {len(ct.origins)}")
+    crop=patient_crop(c,ct,center); slices=table(c,"visualization")["slices_z"]; first_z=int(crop.low[2]+1); last_z=int(len(ct.origins)-crop.high[2])
+    if any(x<first_z or x>last_z for x in slices): raise Error(f"visualization.slices_z must be within retained original DICOM slices {first_z} to {last_z}")
     write(dest/'common/patient.txt',render_patient(c,ct,center)); write(dest/'common/source.txt',render_source(c))
     apertures={ap_name(x.aperture):x.aperture for x in all_cases}
     for name,ap in sorted(apertures.items()): write(dest/'apertures'/name,render_aperture(c,ap))
@@ -415,12 +490,13 @@ def build_tree(dest,root,c,profile,ct,center,production):
         for j,h in enumerate(chunks_data,1):
             name=f"{case.case_id}_chunk_{j:03d}_of_{chunks:03d}.txt"; rel=(Path(study["generated_directory"])/profile/'tasks'/name).as_posix()
             text,output,sd=render_task(c,case,profile,j,chunks,h); write(dest/'tasks'/name,text); paths.append(rel)
-            records.append(dict(case_id=case.case_id,profile=profile,slit_width_mm=case.width,ctc_mm=case.ctc,shift_fraction=case.shift,shift_mm=case.shift*case.ctc,angle_deg=case.angle,slit_count=case.aperture.count,chunk=j,chunks=chunks,chunk_histories=sum(h),seed=sd,input_path=rel,output_path=output))
+            records.append(dict(case_id=case.case_id,profile=profile,slit_width_mm=case.width,ctc_mm=case.ctc,shift_fraction=case.shift,shift_mm=case.shift*case.ctc,angle_deg=case.angle,downstream_surface_distance_mm=case.downstream_surface_distance,slit_count=case.aperture.count,chunk=j,chunks=chunks,chunk_histories=sum(h),seed=sd,input_path=rel,output_path=output))
     write(dest/'inputs.txt',"\n".join(paths)+"\n"); write(dest/'manifest.json',json.dumps(records,indent=2)+"\n")
-    write(dest/'visTest.txt',render_vis_test(c,paths[0]))
+    write(dest/'visTest.txt',render_vis_test(c,paths[0],int(crop.low[2])))
     (dest/'manifest.csv').parent.mkdir(parents=True,exist_ok=True)
     with (dest/'manifest.csv').open('w',newline='') as f: w=csv.DictWriter(f,fieldnames=list(records[0])); w.writeheader(); w.writerows(records)
-    summary=dict(profile=profile,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,ct_shape=[ct.cols,ct.rows,len(ct.origins)],ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=center.local.tolist())
+    spacing=np.array([ct.col_spacing,ct.row_spacing,ct.slice_spacing]); cropped_local=center.local-crop.low*spacing; source_shape=np.array([ct.cols,ct.rows,len(ct.origins)]); retained_min=crop.low+1; retained_max=source_shape-crop.high
+    summary=dict(profile=profile,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,source_ct_shape=source_shape.tolist(),ct_shape=crop.shape.tolist(),ct_crop_voxels=dict(x=[int(x) for x in (crop.low[0],crop.high[0])],y=[int(x) for x in (crop.low[1],crop.high[1])],z=[int(x) for x in (crop.low[2],crop.high[2])]),ct_retained_bounds_one_based=dict(x=[int(retained_min[0]),int(retained_max[0])],y=[int(retained_min[1]),int(retained_max[1])],z=[int(retained_min[2]),int(retained_max[2])]),ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=cropped_local.tolist())
     write(dest/'summary.json',json.dumps(summary,indent=2)+"\n"); return len(all_cases),len(records)
 
 

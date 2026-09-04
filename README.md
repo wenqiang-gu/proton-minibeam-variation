@@ -20,6 +20,66 @@ python -m pip install -r requirements.txt
 The local `dicom_9306087_fine` directory must contain the CT series and
 `RTSTRUCT.dcm`. Patient data are ignored by Git and never modified.
 
+## Convert matRad CT and structures
+
+Convert a MATLAB v7.3 matRad file containing `ct` and `cst` into a DICOM CT
+series and `RTSTRUCT.dcm`:
+
+```sh
+python matRad/convert_matrad_to_dicom.py matRad/9306087_fine.mat
+```
+
+By default this writes `matRad/9306087_fine_dicom`, preserves patient, study,
+and frame-of-reference metadata, and assigns new Series and SOP Instance UIDs
+to the derived DICOM objects. Choose another destination or anonymize the
+patient fields with:
+
+```sh
+python matRad/convert_matrad_to_dicom.py matRad/9306087_fine.mat \
+  --output-dir dicom_converted --anonymize
+```
+
+Crop by giving the numbers of voxels to remove from the low and high sides of
+each axis. For example:
+
+```sh
+python matRad/convert_matrad_to_dicom.py matRad/9306087_fine.mat \
+  --crop-x 10 10 --crop-y 20 20 --crop-z 5 5
+```
+
+All structures are included unless `--structures` names a subset. Quote names
+that contain spaces:
+
+```sh
+python matRad/convert_matrad_to_dicom.py matRad/9306087_fine.mat \
+  --structures "PTV2017fw" "Brainstem DS"
+```
+
+An existing output directory is protected; pass `--overwrite` to replace it.
+Structures that become empty after cropping are omitted with a warning.
+
+Plot a one-based CT Z slice with every RTSTRUCT contour present on that slice:
+
+```sh
+python matRad/plot_dicom_rtstruct_slice.py \
+  matRad/9306087_fine_dicom --z-slice 54
+```
+
+The plot uses one-based CT voxel indices on its X and Y axes and is written as
+`matRad/9306087_fine_dicom_z_slice_54.png` by default. Restrict the overlay to
+named structures, choose an output path, or override the DICOM display window
+with:
+
+```sh
+python matRad/plot_dicom_rtstruct_slice.py \
+  matRad/9306087_fine_dicom --z-slice 54 \
+  --structures "PTV2017fw" "Brainstem DS" \
+  --window 40 400 --output slice_54.png
+```
+
+The viewer writes a PNG using Matplotlib's noninteractive backend, so it also
+works in a headless environment.
+
 To build a private OpenTOPAS installation on BioHPC, where Conda is already
 initialized, run:
 
@@ -50,12 +110,17 @@ the task files to run directly in TOPAS. Existing dose files are never removed.
 
 Shorten any sweep list in `study.toml` to generate a subset. The scorer voxel
 size, history scale, chunks, threads, patient-frame rotation, and aperture are
-also configurable.
+also configurable. `aperture.downstream_surface_distance_mm` contains one
+positive distance for each `sweep.angles_deg` entry in the same order, allowing
+the aperture-to-isocenter distance to vary by beam angle.
 
 Interactive OpenGL visualization is controlled by `[visualization]`. Each
 profile always gets a separate `visTest.txt` that uses the first generated task,
-disables dose scoring, and runs one spot with one history. Production fields and
-tasks contain no graphics settings. The configured OpenGL voxel threshold is
+disables dose scoring, replaces the scoring grid with a coarse 10 mm visualization-only
+grid, adds a white box marking the otherwise invisible proton source group, and runs
+one spot with one history. The box is only a visual marker, not the physical particle
+source. Production fields and tasks retain the
+configured scoring grid and contain no graphics settings. The configured OpenGL voxel threshold is
 deliberately high so the interactive view remains in stored mode instead of
 switching to the slower immediate mode. `slices_z` selects one or more one-based
 DICOM patient slices to display in the visualization input. The outline
@@ -73,6 +138,24 @@ frame references, and all beam vectors. It rasterizes the exact `PTV2017fw`
 contours on the CT grid and uses the included-voxel centroid as isocenter. The
 supplied dataset resolves to approximately
 `(-5.61784, 93.21779, 169.46812) mm` in DICOM patient coordinates.
+
+TOPAS can restrict the patient voxels without creating another DICOM series.
+Crop margins are counts removed from the low and high sides of each original
+DICOM axis:
+
+```toml
+[patient]
+crop_x_voxels = [108, 108]
+crop_y_voxels = [108, 108]
+crop_z_voxels = [0, 0]
+```
+
+The generator writes one-based inclusive `RestrictVoxels*Min/Max` parameters,
+compensates the patient translation so the isocenter remains fixed, and rejects
+a crop that removes any voxel of the configured ROI. Visualization Z slices
+remain numbered in the original DICOM series and are remapped automatically.
+Cropping changes the simulated patient geometry: use enough margin to retain
+material relevant to the beam path and scattered particles.
 
 The brass aperture stays 45 mm in radius and 60 mm thick; slits are 20 mm high.
 For each width/CTC pair, the largest count up to 20 that fits at every shift is

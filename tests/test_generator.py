@@ -1,3 +1,4 @@
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,11 +74,107 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(len(output_directories), expected_cases)
         self.assertTrue(all(str(path).startswith(str(ROOT / "output/smoke")) for path in output_directories))
 
+    def test_per_angle_downstream_surface_distances(self):
+        config = copy.deepcopy(self.config)
+        config["sweep"]["angles_deg"] = [0.0, 45.0, 90.0]
+        config["aperture"]["downstream_surface_distance_mm"] = [100.0, 125.0, 150.0]
+        generated_cases = g.cases(config, "smoke")
+        expected = {0.0: 100.0, 45.0: 125.0, 90.0: 150.0}
+        self.assertTrue(generated_cases)
+        for case in generated_cases:
+            self.assertEqual(case.downstream_surface_distance, expected[case.angle])
+            field = g.render_field(config, case, "smoke")
+            self.assertIn(
+                f"d:Ge/Snout/TransZ = {g.fmt(-(expected[case.angle] + 30.0))} mm",
+                field,
+            )
+        self.assertNotIn("Ge/Snout/TransZ", g.render_aperture(config, generated_cases[0].aperture))
+
+        config["sweep"]["angles_deg"] = [45.0]
+        config["aperture"]["downstream_surface_distance_mm"] = [123.0]
+        single_angle_cases = g.cases(config, "smoke")
+        self.assertTrue(all(case.angle == 45.0 for case in single_angle_cases))
+        self.assertTrue(all(case.downstream_surface_distance == 123.0 for case in single_angle_cases))
+
+    def test_downstream_surface_distance_array_validation(self):
+        original = "downstream_surface_distance_mm = [150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0]"
+        invalid = {
+            "scalar": ("downstream_surface_distance_mm = 150.0", "non-empty numeric array"),
+            "empty": ("downstream_surface_distance_mm = []", "non-empty numeric array"),
+            "short": ("downstream_surface_distance_mm = [150.0]", "same length"),
+            "boolean": ("downstream_surface_distance_mm = [true, true, true, true, true, true, true, true]", "non-empty numeric array"),
+            "nonnumeric": ('downstream_surface_distance_mm = ["x", "x", "x", "x", "x", "x", "x", "x"]', "non-empty numeric array"),
+            "zero": ("downstream_surface_distance_mm = [0.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0]", "values must be positive"),
+            "negative": ("downstream_surface_distance_mm = [-1.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0]", "values must be positive"),
+        }
+        source = (ROOT / "study.toml").read_text()
+        self.assertIn(original, source)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "study.toml"
+            for name, (replacement, message) in invalid.items():
+                with self.subTest(name=name):
+                    path.write_text(source.replace(original, replacement))
+                    with self.assertRaisesRegex(g.Error, message):
+                        g.load_config(path)
+
     def test_actual_ptv_centroid(self):
         ct = g.read_ct(ROOT / "dicom_9306087_fine")
         center = g.roi_center(ct, ROOT / "dicom_9306087_fine/RTSTRUCT.dcm", "PTV2017fw")
         np.testing.assert_allclose(center.patient, [-5.61784, 93.21779, 169.46812], atol=1e-4)
         self.assertEqual(center.voxels, 6963)
+        np.testing.assert_array_equal(center.index_min, [150, 162, 40])
+        np.testing.assert_array_equal(center.index_max, [186, 186, 66])
+
+    def test_topas_native_patient_crop(self):
+        ct = g.read_ct(ROOT / "dicom_9306087_fine")
+        center = g.roi_center(ct, ROOT / "dicom_9306087_fine/RTSTRUCT.dcm", "PTV2017fw")
+        crop = g.patient_crop(self.config, ct, center)
+        configured_low = np.array([
+            self.config["patient"][f"crop_{axis}_voxels"][0] for axis in "xyz"
+        ])
+        configured_high = np.array([
+            self.config["patient"][f"crop_{axis}_voxels"][1] for axis in "xyz"
+        ])
+        source_shape = np.array([ct.cols, ct.rows, len(ct.origins)])
+        np.testing.assert_array_equal(crop.low, configured_low)
+        np.testing.assert_array_equal(crop.high, configured_high)
+        np.testing.assert_array_equal(crop.shape, source_shape-configured_low-configured_high)
+        patient = g.render_patient(self.config, ct, center)
+        for index, axis in enumerate("XYZ"):
+            self.assertIn(f"RestrictVoxels{axis}Min = {configured_low[index]+1}", patient)
+            self.assertIn(f"RestrictVoxels{axis}Max = {source_shape[index]-configured_high[index]}", patient)
+        spacing = np.array([ct.col_spacing, ct.row_spacing, ct.slice_spacing])
+        cropped_local = center.local-configured_low*spacing
+        expected_translation = crop.shape*spacing/2-cropped_local
+        for axis, value in zip("XYZ", expected_translation):
+            self.assertIn(f"d:Ge/Patient/Trans{axis} = {g.fmt(value)} mm", patient)
+
+    def test_asymmetric_crop_compensates_translation_and_rejects_roi_clipping(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); synthetic_series(root, [1, 0, 0, 0, 1, 0])
+            ct = g.read_ct(root); center = g.roi_center(ct, root / "RTSTRUCT.dcm", "Target")
+            uncropped = copy.deepcopy(self.config)
+            for axis in "xyz": uncropped["patient"].pop(f"crop_{axis}_voxels", None)
+            cropped = copy.deepcopy(uncropped)
+            cropped["patient"]["crop_x_voxels"] = [1, 2]
+            cropped["patient"]["crop_y_voxels"] = [1, 1]
+            cropped["patient"]["crop_z_voxels"] = [0, 1]
+            before = ct.size/2-center.local
+            spacing = np.array([ct.col_spacing,ct.row_spacing,ct.slice_spacing])
+            expected = before+(np.array([1,1,0])-np.array([2,1,1]))*spacing/2
+            rendered = g.render_patient(cropped,ct,center)
+            for axis,value in zip("XYZ",expected): self.assertIn(f"d:Ge/Patient/Trans{axis} = {g.fmt(value)} mm",rendered)
+            clipping = copy.deepcopy(uncropped); clipping["patient"]["crop_x_voxels"]=[3,0]
+            with self.assertRaisesRegex(g.Error,"removes voxels from the configured ROI"):
+                g.patient_crop(clipping,ct,center)
+
+    def test_crop_validation_and_visualization_slice_remapping(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"study.toml"; text=(ROOT/"study.toml").read_text()
+            path.write_text(text.replace("crop_x_voxels = [108, 108]","crop_x_voxels = [-1, 0]"))
+            with self.assertRaisesRegex(g.Error,"two nonnegative integers"): g.load_config(path)
+        vis=g.render_vis_test(self.config,"generated/smoke/tasks/example.txt",10)
+        self.assertIn("ShowSpecificSlicesZ = 1 44",vis)
 
     def test_rotated_orientation_and_roi_error(self):
         with tempfile.TemporaryDirectory() as d:
@@ -116,11 +213,38 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn('d:Gr/ViewA/AxesSize = 200 mm', rendered)
         field = g.render_field(self.config, g.cases(self.config, "smoke")[0], "smoke")
         self.assertNotIn('Gr/ViewA', field)
+        self.assertNotIn('BeamPosition20', field)
         vis_test = g.render_vis_test(self.config, "generated/smoke/tasks/example.txt")
         self.assertIn('includeFile = generated/smoke/tasks/example.txt', vis_test)
+        self.assertIn('dv:Ge/Patient/CloneRTDoseGridSize = 3 10 10 10 mm', vis_test)
+        for source_marker_parameter in (
+            's:Ge/BeamPosition20/Parent = "BeamPosition2"',
+            's:Ge/BeamPosition20/Type = "TsBox"',
+            's:Ge/BeamPosition20/Material = "Air"',
+            'd:Ge/BeamPosition20/HLX = 10 mm',
+            'd:Ge/BeamPosition20/HLY = 10 mm',
+            'd:Ge/BeamPosition20/HLZ = 20 mm',
+            'd:Ge/BeamPosition20/TransX = 0 mm',
+            'd:Ge/BeamPosition20/TransY = 0 mm',
+            'd:Ge/BeamPosition20/TransZ = 0 mm',
+            'd:Ge/BeamPosition20/RotX = 0 deg',
+            'd:Ge/BeamPosition20/RotY = 0 deg',
+            'd:Ge/BeamPosition20/RotZ = 0 deg',
+            's:Ge/BeamPosition20/Color = "white"',
+        ):
+            self.assertIn(source_marker_parameter, vis_test)
         self.assertIn('b:Sc/PatientDose/Active = "False"', vis_test)
         self.assertIn('i:Ts/NumberOfThreads = 1', vis_test)
         self.assertIn('iv:Ge/Patient/ShowSpecificSlicesZ = 1 54', vis_test)
+        task, _, _ = g.render_task(
+            self.config,
+            g.cases(self.config, "smoke")[0],
+            "smoke",
+            1,
+            1,
+            [1] * g.integer(g.table(self.config, "beam"), "spot_count"),
+        )
+        self.assertNotIn('BeamPosition20', task)
 
 
 if __name__ == "__main__": unittest.main()

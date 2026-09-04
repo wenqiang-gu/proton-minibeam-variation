@@ -7,3 +7,5 @@ generated/
 output/
 Slurm/logs/
 *.png
+/matRad/*.mat
+/matRad/*_dicom/
