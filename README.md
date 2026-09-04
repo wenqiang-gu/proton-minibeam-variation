@@ -86,17 +86,32 @@ Run a task from the repository root:
 topas generated/smoke/tasks/smoke_sw040_ctc300_shift000_angle045_chunk_001_of_001.txt
 ```
 
-Submit a profile on the original cluster:
+Submit a profile on ROHPC by naming its OpenTOPAS environment explicitly:
 
 ```sh
-Slurm/submit_topas_array.sh --manifest generated/smoke/inputs.txt --dry-run
-Slurm/submit_topas_array.sh --manifest generated/smoke/inputs.txt --throttle 5
+Slurm/submit_topas_array.sh \
+  --topas-env "/data/maia/$USER/Applications/TOPAS/opentopas-env.sh" \
+  --manifest generated/smoke/inputs.txt \
+  --throttle 5
 ```
 
-The worker uses `/data/maia/$USER/Applications/TOPAS/opentopas-env.sh` unless
-`TOPAS_ENV` is set. The default full-CT grid is 0.4 x 0.4 x 3 mm and can produce
-very large dose files; verify disk, memory, and scheduler limits with smoke runs
-before submitting production.
+On BioHPC, supply the installation on project storage instead:
+
+```sh
+Slurm/submit_topas_array.sh \
+  --topas-env "/project/radiology/HGao_lab/$USER/Applications/TOPAS/opentopas-env.sh" \
+  --manifest generated/production/inputs.txt \
+  --throttle 5
+```
+
+Alternatively, export `TOPAS_ENV` once and omit `--topas-env` from later
+submissions. The CLI option takes precedence when both are present. Optional
+`--account`, `--qos`, `--partition`, `--time`, and `--mem` arguments are passed
+to `sbatch`; inspect the complete command first with `--dry-run`.
+
+The default full-CT grid is 0.4 x 0.4 x 3 mm and can produce very large dose
+files; verify disk, memory, and scheduler limits with smoke runs before
+submitting production.
 
 Combine each field's available binary chunks independently:
 

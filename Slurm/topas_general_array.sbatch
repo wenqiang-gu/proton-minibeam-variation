@@ -96,6 +96,7 @@ trap report_runtime EXIT
 : "${TOPAS_MANIFEST:?TOPAS_MANIFEST is not set}"
 : "${TOPAS_MANIFEST_SHA256:?TOPAS_MANIFEST_SHA256 is not set}"
 : "${TOPAS_TASK_COUNT:?TOPAS_TASK_COUNT is not set}"
+: "${TOPAS_ENV:?TOPAS_ENV is not set; submit with --topas-env FILE or export TOPAS_ENV}"
 
 if [[ ! $SLURM_CPUS_PER_TASK =~ ^[1-9][0-9]*$ ]]; then
     echo "SLURM_CPUS_PER_TASK must be a positive integer: $SLURM_CPUS_PER_TASK" >&2
@@ -151,9 +152,12 @@ if [[ $topas_threads != "$SLURM_CPUS_PER_TASK" ]]; then
     exit 2
 fi
 
-topas_env=${TOPAS_ENV:-"/data/maia/$USER/Applications/TOPAS/opentopas-env.sh"}
-if [[ ! -f $topas_env ]]; then
-    echo "TOPAS environment script not found: $topas_env" >&2
+if [[ $TOPAS_ENV != /* ]]; then
+    echo "TOPAS environment path must be absolute: $TOPAS_ENV" >&2
+    exit 2
+fi
+if [[ ! -f $TOPAS_ENV || ! -r $TOPAS_ENV || ! -s $TOPAS_ENV ]]; then
+    echo "TOPAS environment script is missing, unreadable, or empty: $TOPAS_ENV" >&2
     exit 2
 fi
 
@@ -180,12 +184,17 @@ case "$output_file" in
 esac
 
 # shellcheck disable=SC1090
-source "$topas_env"
+source "$TOPAS_ENV"
+if ! command -v topas >/dev/null 2>&1; then
+    echo "TOPAS environment did not make the topas command available: $TOPAS_ENV" >&2
+    exit 2
+fi
 
 echo "Array job: ${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}"
 echo "Array task: $SLURM_ARRAY_TASK_ID of $TOPAS_TASK_COUNT"
 echo "Manifest: $TOPAS_MANIFEST"
 echo "Manifest SHA-256: $TOPAS_MANIFEST_SHA256"
+echo "TOPAS environment: $TOPAS_ENV"
 echo "Node: $(hostname)"
 echo "Allocated CPUs: $SLURM_CPUS_PER_TASK"
 echo "TOPAS input: $topas_input"

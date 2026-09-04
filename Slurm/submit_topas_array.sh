@@ -16,8 +16,11 @@ Options:
   --time LIMIT       Override the worker's 48:00:00 time limit.
   --mem SIZE         Request memory, for example 12G or 32000M.
   --partition NAME   Select a Slurm partition.
+  --account NAME     Select a Slurm account.
+  --qos NAME         Select a Slurm quality of service.
   --exclude NODES    Exclude a Slurm node list, for example rohpc[9003-9005].
   --job-name NAME    Override the default job name topas_general.
+  --topas-env FILE   OpenTOPAS environment script. If omitted, use TOPAS_ENV.
   --cpus-per-task N  Require N CPUs per task; N must match NumberOfThreads in
                      every selected TOPAS input (default: infer from inputs).
   --manifest FILE    Read repository-relative TOPAS inputs from FILE.
@@ -26,7 +29,8 @@ Options:
   -h, --help         Show this help.
 
 Every input must directly define one positive i:Ts/NumberOfThreads value. All
-selected inputs must use the same value.
+selected inputs must use the same value. The TOPAS environment must be supplied
+explicitly with --topas-env or TOPAS_ENV; no cluster-specific path is assumed.
 EOF
 }
 
@@ -34,9 +38,12 @@ throttle=5
 time_limit=
 memory=
 partition=
+account=
+qos=
 excluded_nodes=
 job_name=
 requested_cpus=
+requested_topas_env=
 dry_run=false
 input_manifest=
 inputs=()
@@ -63,6 +70,16 @@ while (( $# > 0 )); do
             partition=$2
             shift 2
             ;;
+        --account)
+            [[ $# -ge 2 ]] || { echo "--account requires a value" >&2; exit 2; }
+            account=$2
+            shift 2
+            ;;
+        --qos)
+            [[ $# -ge 2 ]] || { echo "--qos requires a value" >&2; exit 2; }
+            qos=$2
+            shift 2
+            ;;
         --exclude)
             [[ $# -ge 2 ]] || { echo "--exclude requires a value" >&2; exit 2; }
             excluded_nodes=$2
@@ -76,6 +93,11 @@ while (( $# > 0 )); do
         --cpus-per-task)
             [[ $# -ge 2 ]] || { echo "--cpus-per-task requires a value" >&2; exit 2; }
             requested_cpus=$2
+            shift 2
+            ;;
+        --topas-env)
+            [[ $# -ge 2 ]] || { echo "--topas-env requires a file" >&2; exit 2; }
+            requested_topas_env=$2
             shift 2
             ;;
         --manifest)
@@ -124,6 +146,23 @@ if [[ -n $requested_cpus && ! $requested_cpus =~ ^[1-9][0-9]*$ ]]; then
     echo "--cpus-per-task must be a positive integer" >&2
     exit 2
 fi
+topas_env=${requested_topas_env:-${TOPAS_ENV:-}}
+if [[ -z $topas_env ]]; then
+    echo "OpenTOPAS environment is required; use --topas-env FILE or set TOPAS_ENV." >&2
+    exit 2
+fi
+if [[ $topas_env != /* ]]; then
+    echo "TOPAS environment path must be absolute: $topas_env" >&2
+    exit 2
+fi
+if [[ $topas_env == *','* || $topas_env == *$'\n'* || $topas_env == *$'\r'* ]]; then
+    echo "TOPAS environment path may not contain commas or newlines: $topas_env" >&2
+    exit 2
+fi
+if [[ ! -f $topas_env || ! -r $topas_env || ! -s $topas_env ]]; then
+    echo "TOPAS environment script is missing, unreadable, or empty: $topas_env" >&2
+    exit 2
+fi
 if (( ${#inputs[@]} == 0 )); then
     echo "At least one TOPAS input file is required" >&2
     usage >&2
@@ -146,6 +185,11 @@ project_root=$(cd -- "$script_dir/.." && pwd -P)
 worker=$project_root/Slurm/topas_general_array.sbatch
 if [[ ! -f $worker ]] || [[ ! -f $project_root/study.toml ]]; then
     echo "Could not identify the proton-minibeam-variation project root" >&2
+    exit 2
+fi
+topas_env=$(realpath "$topas_env")
+if [[ $topas_env == *','* || $topas_env == *$'\n'* || $topas_env == *$'\r'* ]]; then
+    echo "Resolved TOPAS environment path is unsafe for Slurm --export: $topas_env" >&2
     exit 2
 fi
 
@@ -247,6 +291,7 @@ fi
 echo "TOPAS inputs: $task_count"
 echo "Array specification: $array_spec"
 echo "CPUs per task (from TOPAS inputs): $inferred_threads"
+echo "TOPAS environment: $topas_env"
 echo "First input: $(head -n 1 "$sorted_list")"
 echo "Last input: $(tail -n 1 "$sorted_list")"
 
@@ -254,6 +299,8 @@ sbatch_args=(--array="$array_spec" --cpus-per-task="$inferred_threads")
 [[ -z $time_limit ]] || sbatch_args+=(--time="$time_limit")
 [[ -z $memory ]] || sbatch_args+=(--mem="$memory")
 [[ -z $partition ]] || sbatch_args+=(--partition="$partition")
+[[ -z $account ]] || sbatch_args+=(--account="$account")
+[[ -z $qos ]] || sbatch_args+=(--qos="$qos")
 [[ -z $excluded_nodes ]] || sbatch_args+=(--exclude="$excluded_nodes")
 [[ -z $job_name ]] || sbatch_args+=(--job-name="$job_name")
 
@@ -261,7 +308,7 @@ if [[ $dry_run == true ]]; then
     printf 'Dry run command: sbatch'
     printf ' %q' "${sbatch_args[@]}"
     printf ' --export=%q %q\n' \
-        "ALL,TOPAS_MANIFEST=<manifest>,TOPAS_MANIFEST_SHA256=<sha256>,TOPAS_TASK_COUNT=$task_count" \
+        "ALL,TOPAS_ENV=$topas_env,TOPAS_MANIFEST=<manifest>,TOPAS_MANIFEST_SHA256=<sha256>,TOPAS_TASK_COUNT=$task_count" \
         "$worker"
     echo "Dry run only; no manifest was written and no job was submitted."
     exit 0
@@ -272,7 +319,7 @@ manifest=$project_root/Slurm/logs/topas_manifest_$(date +%Y%m%dT%H%M%S)_$$.txt
 cp "$sorted_list" "$manifest"
 chmod 0444 "$manifest"
 manifest_hash=$(sha256sum "$manifest" | awk '{print $1}')
-export_spec="ALL,TOPAS_MANIFEST=$manifest,TOPAS_MANIFEST_SHA256=$manifest_hash,TOPAS_TASK_COUNT=$task_count"
+export_spec="ALL,TOPAS_ENV=$topas_env,TOPAS_MANIFEST=$manifest,TOPAS_MANIFEST_SHA256=$manifest_hash,TOPAS_TASK_COUNT=$task_count"
 
 echo "Manifest: $manifest"
 echo "Manifest SHA-256: $manifest_hash"
