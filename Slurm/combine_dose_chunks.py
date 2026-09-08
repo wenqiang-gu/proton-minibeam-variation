@@ -58,6 +58,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="generated/output profile to combine",
     )
     parser.add_argument(
+        "--batch-id",
+        help="optional batch identifier used when the profile was generated",
+    )
+    parser.add_argument(
         "--project-root", type=Path, default=project_root,
         help=f"project root (default: {project_root})",
     )
@@ -89,15 +93,18 @@ def contained_path(root: Path, value: str, label: str) -> Path:
     return path
 
 
-def read_manifest(root: Path, profile: str) -> dict[str, tuple[ChunkRecord, ...]]:
+def read_manifest(root: Path, profile: str, batch_id: str | None = None) -> dict[str, tuple[ChunkRecord, ...]]:
     root = root.resolve()
-    manifest = root / "generated" / profile / "manifest.csv"
+    relative_profile = Path(profile) / batch_id if batch_id else Path(profile)
+    manifest = root / "generated" / relative_profile / "manifest.csv"
     if not manifest.is_file():
         raise CombineError(f"Generated profile manifest does not exist: {manifest}")
     if manifest.stat().st_size == 0:
         raise CombineError(f"Generated profile manifest is empty: {manifest}")
 
     required = {"case_id", "profile", "chunk", "chunks", "output_path"}
+    if batch_id:
+        required.add("batch_id")
     grouped: dict[str, list[ChunkRecord]] = {}
     seen: set[tuple[str, int]] = set()
     try:
@@ -117,6 +124,12 @@ def read_manifest(root: Path, profile: str) -> dict[str, tuple[ChunkRecord, ...]
                     raise CombineError(
                         f"Manifest line {line_number} has profile {row_profile!r}, "
                         f"expected {profile!r}"
+                    )
+                row_batch = (row.get("batch_id") or "").strip()
+                if batch_id and row_batch != batch_id:
+                    raise CombineError(
+                        f"Manifest line {line_number} has batch_id {row_batch!r}, "
+                        f"expected {batch_id!r}"
                     )
                 try:
                     chunk = int(row["chunk"])
@@ -151,7 +164,7 @@ def read_manifest(root: Path, profile: str) -> dict[str, tuple[ChunkRecord, ...]
         raise CombineError(f"Generated profile manifest contains no fields: {manifest}")
 
     result: dict[str, tuple[ChunkRecord, ...]] = {}
-    expected_parent = (root / "output" / profile).resolve()
+    expected_parent = (root / "output" / relative_profile).resolve()
     for case_id, records in grouped.items():
         totals = {record.chunks for record in records}
         if len(totals) != 1:
@@ -412,12 +425,14 @@ def combine_field(field: FieldInputs, block_values: int, overwrite: bool) -> str
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.batch_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.batch_id):
+        raise CombineError("--batch-id must contain only letters, numbers, '_' and '-'")
     if args.block_values <= 0:
         raise CombineError("--block-values must be a positive integer")
     root = args.project_root.resolve()
     if not root.is_dir():
         raise CombineError(f"Project root does not exist: {root}")
-    fields = read_manifest(root, args.profile)
+    fields = read_manifest(root, args.profile, args.batch_id)
 
     complete = partial = failed = existing = 0
     for case_id, records in sorted(fields.items()):
@@ -458,7 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     action = "Validated" if args.validate_only else "Combined"
     print(
-        f"{action} profile {args.profile}: complete={complete}, partial={partial}, "
+        f"{action} profile {args.profile}{('/' + args.batch_id) if args.batch_id else ''}: complete={complete}, partial={partial}, "
         f"failed={failed}, existing={existing}"
     )
     return 2 if failed else 0

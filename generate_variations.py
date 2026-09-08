@@ -155,6 +155,9 @@ def load_config(path: Path) -> dict[str, Any]:
             raise Error(f"patient.{key} must contain two nonnegative integers")
     for name,pf in table(c,"profiles").items():
         if not re.fullmatch(r"[A-Za-z0-9_-]+",name): raise Error(f"unsafe profile name {name!r}")
+        batch_id=pf.get("batch_id")
+        if batch_id is not None and (not isinstance(batch_id,str) or not re.fullmatch(r"[A-Za-z0-9_-]+",batch_id)):
+            raise Error(f"profiles.{name}.batch_id must contain only letters, numbers, '_' and '-'")
         if pf.get("history_mode") not in ("uniform","scaled"): raise Error(f"invalid history mode in {name}")
         integer(pf,"chunks"); integer(pf,"histories_per_spot") if pf["history_mode"]=="uniform" else num(pf,"history_scale")
     return c
@@ -388,7 +391,18 @@ def split_histories(histories,chunks):
 
 
 def fmt(x): return f"{x:.10g}"
-def seed(profile,case,chunk): return int.from_bytes(hashlib.sha256(f"minibeam:{profile}:{case}:{chunk}".encode()).digest()[:4],"big")%2147483646+1
+def profile_batch_id(c,name):
+    return table(c,"profiles")[name].get("batch_id")
+
+
+def profile_path(profile,batch_id=None):
+    path=Path(profile)
+    return path/batch_id if batch_id else path
+
+
+def seed(profile,case,chunk,batch_id=None):
+    identity=f"minibeam:{profile}:{case}:{chunk}" if batch_id is None else f"minibeam:{profile}:{batch_id}:{case}:{chunk}"
+    return int.from_bytes(hashlib.sha256(identity.encode()).digest()[:4],"big")%2147483646+1
 def write(path,text): path.parent.mkdir(parents=True,exist_ok=True); path.write_text(text)
 def ap_name(ap): return f"sw{round(ap.width*100):03d}_ctc{round(ap.ctc*100):03d}_shift{round(ap.shift*100):03d}.txt"
 
@@ -525,8 +539,8 @@ iv:Ge/Patient/ShowSpecificSlicesZ = {len(slices)} {" ".join(map(str,slices))}
 {render_visualization(c)}'''
 
 
-def render_field(c,case,profile):
-    study,beam,top,sc=table(c,"study"),table(c,"beam"),table(c,"topas"),table(c,"scoring"); base=Path(study["generated_directory"])/profile
+def render_field(c,case,profile,batch_id=None):
+    study,beam,top,sc=table(c,"study"),table(c,"beam"),table(c,"topas"),table(c,"scoring"); base=Path(study["generated_directory"])/profile_path(profile,batch_id)
     modules=" ".join(f'"{x}"' for x in top["physics_modules"]); spots=integer(beam,"spot_count")
     snout_z=-(case.downstream_surface_distance+num(table(c,"aperture"),"thickness_mm")/2)
     return f'''# Generated field {case.case_id}; do not edit.
@@ -556,9 +570,9 @@ sv:Sc/PatientDose/Report = 1 "Sum"
 '''
 
 
-def render_task(c,case,profile,chunk,chunks,histories):
-    study=table(c,"study"); spots=integer(table(c,"beam"),"spot_count"); base=Path(study["generated_directory"])/profile
-    suffix=f"chunk_{chunk:03d}_of_{chunks:03d}"; output=Path(study["output_directory"])/profile/case.case_id/f"Dose_{suffix}"; sd=seed(profile,case.case_id,chunk)
+def render_task(c,case,profile,chunk,chunks,histories,batch_id=None):
+    study=table(c,"study"); spots=integer(table(c,"beam"),"spot_count"); base=Path(study["generated_directory"])/profile_path(profile,batch_id)
+    suffix=f"chunk_{chunk:03d}_of_{chunks:03d}"; output=Path(study["output_directory"])/profile_path(profile,batch_id)/case.case_id/f"Dose_{suffix}"; sd=seed(profile,case.case_id,chunk,batch_id)
     text=f'''# Generated runnable task; do not edit.
 includeFile = {(base/'fields'/f'{case.case_id}.txt').as_posix()}
 i:Ts/NumberOfThreads = {integer(table(c,"topas"),"threads")}
@@ -572,18 +586,19 @@ s:Sc/PatientDose/SeriesDescription = "{case.case_id} {suffix}"
 
 def build_tree(dest,root,c,profile,ct,center,production,envelope):
     histories,chunks=profile_data(c,profile,production); chunks_data=split_histories(histories,chunks); all_cases=cases(c,profile,envelope)
+    batch_id=profile_batch_id(c,profile); relative_profile=profile_path(profile,batch_id)
     crop=patient_crop(c,ct,center); slices=table(c,"visualization")["slices_z"]; first_z=int(crop.low[2]+1); last_z=int(len(ct.origins)-crop.high[2])
     if any(x<first_z or x>last_z for x in slices): raise Error(f"visualization.slices_z must be within retained original DICOM slices {first_z} to {last_z}")
     write(dest/'common/patient.txt',render_patient(c,ct,center)); write(dest/'common/source.txt',render_source(c))
     apertures={ap_name(x.aperture):x.aperture for x in all_cases}
     for name,ap in sorted(apertures.items()): write(dest/'apertures'/name,render_aperture(c,ap))
-    for case in all_cases: write(dest/'fields'/f'{case.case_id}.txt',render_field(c,case,profile))
+    for case in all_cases: write(dest/'fields'/f'{case.case_id}.txt',render_field(c,case,profile,batch_id))
     records=[]; paths=[]; study=table(c,"study")
     for case in all_cases:
         for j,h in enumerate(chunks_data,1):
-            name=f"{case.case_id}_chunk_{j:03d}_of_{chunks:03d}.txt"; rel=(Path(study["generated_directory"])/profile/'tasks'/name).as_posix()
-            text,output,sd=render_task(c,case,profile,j,chunks,h); write(dest/'tasks'/name,text); paths.append(rel)
-            records.append(dict(case_id=case.case_id,profile=profile,slit_width_mm=case.width,ctc_mm=case.ctc,shift_fraction=case.shift,shift_mm=case.shift*case.ctc,angle_deg=case.angle,downstream_surface_distance_mm=case.downstream_surface_distance,slit_count=case.aperture.count,chunk=j,chunks=chunks,chunk_histories=sum(h),seed=sd,input_path=rel,output_path=output))
+            name=f"{case.case_id}_chunk_{j:03d}_of_{chunks:03d}.txt"; rel=(Path(study["generated_directory"])/relative_profile/'tasks'/name).as_posix()
+            text,output,sd=render_task(c,case,profile,j,chunks,h,batch_id); write(dest/'tasks'/name,text); paths.append(rel)
+            records.append(dict(case_id=case.case_id,profile=profile,batch_id=batch_id or "",slit_width_mm=case.width,ctc_mm=case.ctc,shift_fraction=case.shift,shift_mm=case.shift*case.ctc,angle_deg=case.angle,downstream_surface_distance_mm=case.downstream_surface_distance,slit_count=case.aperture.count,chunk=j,chunks=chunks,chunk_histories=sum(h),seed=sd,input_path=rel,output_path=output))
     write(dest/'inputs.txt',"\n".join(paths)+"\n"); write(dest/'manifest.json',json.dumps(records,indent=2)+"\n")
     write(dest/'visTest.txt',render_vis_test(c,paths[0],int(crop.low[2])))
     (dest/'manifest.csv').parent.mkdir(parents=True,exist_ok=True)
@@ -593,7 +608,7 @@ def build_tree(dest,root,c,profile,ct,center,production,envelope):
     for width,ctc in product(nums(table(c,"sweep"),"slit_width_mm"),nums(table(c,"sweep"),"ctc_mm")):
         count=next(case.aperture.count for case in all_cases if case.width==width and case.ctc==ctc)
         designs.append(aperture_design_metrics(c,width,ctc,count,envelope))
-    summary=dict(profile=profile,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,beam_envelope_sigma=envelope.sigma,aperture_beam_envelope_mm=dict(x=[envelope.x_min,envelope.x_max],y=[envelope.y_min,envelope.y_max]),aperture_designs=designs,source_ct_shape=source_shape.tolist(),ct_shape=crop.shape.tolist(),ct_crop_voxels=dict(x=[int(x) for x in (crop.low[0],crop.high[0])],y=[int(x) for x in (crop.low[1],crop.high[1])],z=[int(x) for x in (crop.low[2],crop.high[2])]),ct_retained_bounds_one_based=dict(x=[int(retained_min[0]),int(retained_max[0])],y=[int(retained_min[1]),int(retained_max[1])],z=[int(retained_min[2]),int(retained_max[2])]),ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=cropped_local.tolist())
+    summary=dict(profile=profile,batch_id=batch_id,case_count=len(all_cases),task_count=len(records),aperture_count=len(apertures),spot_count=len(histories),histories_per_case=sum(histories),chunks_per_case=chunks,beam_envelope_sigma=envelope.sigma,aperture_beam_envelope_mm=dict(x=[envelope.x_min,envelope.x_max],y=[envelope.y_min,envelope.y_max]),aperture_designs=designs,source_ct_shape=source_shape.tolist(),ct_shape=crop.shape.tolist(),ct_crop_voxels=dict(x=[int(x) for x in (crop.low[0],crop.high[0])],y=[int(x) for x in (crop.low[1],crop.high[1])],z=[int(x) for x in (crop.low[2],crop.high[2])]),ct_retained_bounds_one_based=dict(x=[int(retained_min[0]),int(retained_max[0])],y=[int(retained_min[1]),int(retained_max[1])],z=[int(retained_min[2]),int(retained_max[2])]),ct_spacing_mm=[ct.col_spacing,ct.row_spacing,ct.slice_spacing],ptv_voxel_count=center.voxels,isocenter_patient_xyz_mm=center.patient.tolist(),isocenter_local_xyz_mm=cropped_local.tolist())
     write(dest/'summary.json',json.dumps(summary,indent=2)+"\n"); return len(all_cases),len(records)
 
 
@@ -611,7 +626,7 @@ def case_output_directories(root,c,profile,envelope=None):
     if output_root==root: raise Error("output_directory cannot be the project root")
     if envelope is None:
         beam=table(c,"beam"); envelope=beam_envelope((root/beam["time_feature_file"]).resolve(),c)
-    return [output_root/profile/case.case_id for case in cases(c,profile,envelope)]
+    return [output_root/profile_path(profile,profile_batch_id(c,profile))/case.case_id for case in cases(c,profile,envelope)]
 
 
 def ensure_output_directories(root,c,profile,envelope=None):
@@ -627,14 +642,14 @@ def execute(config_path,profile,check=False,force=False,clean=False):
     try: generated.relative_to(root)
     except ValueError as e: raise Error("generated_directory must be inside the project root") from e
     if generated==root: raise Error("generated_directory cannot be the project root")
-    target=generated/profile
+    batch_id=profile_batch_id(c,profile); target=generated/profile_path(profile,batch_id)
     if clean:
         if target.exists(): shutil.rmtree(target); print(f"Removed {target}")
         else: print(f"Nothing to remove: {target}")
         return 0
     p=table(c,"patient"); ct=read_ct((root/p["dicom_directory"]).resolve()); center=roi_center(ct,(root/p["rtstruct"]).resolve(),str(p["roi_name"]))
     b=table(c,"beam"); beam_path=(root/b["time_feature_file"]).resolve(); production=beam_histories(beam_path,integer(b,"spot_count")); envelope=beam_envelope(beam_path,c)
-    generated.mkdir(parents=True,exist_ok=True); temporary: Path|None=Path(tempfile.mkdtemp(prefix=f'.{profile}.',dir=generated))
+    target.parent.mkdir(parents=True,exist_ok=True); temporary: Path|None=Path(tempfile.mkdtemp(prefix=f'.{profile}.',dir=target.parent))
     try:
         count,tasks=build_tree(temporary,root,c,profile,ct,center,production,envelope); diff=differences(temporary,target)
         if check:

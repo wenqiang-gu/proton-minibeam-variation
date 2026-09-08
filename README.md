@@ -108,6 +108,25 @@ must match exactly; use `--force` to replace only a stale generated profile or
 Generation also creates every case's empty directory below `output/`, allowing
 the task files to run directly in TOPAS. Existing dose files are never removed.
 
+To add independent histories without replacing an earlier production run, give
+the profile a safe batch identifier and set `history_scale` to the additional
+scale for that batch:
+
+```toml
+[profiles.production]
+history_mode = "scaled"
+history_scale = 0.04
+chunks = 100
+batch_id = "extra_4pct"
+```
+
+This writes configuration below `generated/production/extra_4pct/` and dose
+files below `output/production/extra_4pct/`. The batch identifier is included
+in every deterministic random seed, so different batches use independent
+streams. Omitting `batch_id` preserves the legacy `generated/production/` and
+`output/production/` layout and seed calculation. Treat a batch identifier as
+immutable after starting its jobs.
+
 Shorten any sweep list in `study.toml` to generate a subset. The scorer voxel
 size, history scale, chunks, threads, patient-frame rotation, and aperture are
 also configurable. `aperture.downstream_surface_distance_mm` contains one
@@ -206,6 +225,12 @@ Combine each field's available binary chunks independently:
 
 ```sh
 python Slurm/combine_dose_chunks.py --profile production
+```
+
+For a named batch, select its matching manifest and output directory:
+
+```sh
+python Slurm/combine_dose_chunks.py --profile production --batch-id extra_4pct
 ```
 
 Complete fields produce `Dose_combined.bin`; fields with missing or invalid

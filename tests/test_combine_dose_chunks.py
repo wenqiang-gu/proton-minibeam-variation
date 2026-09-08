@@ -19,19 +19,21 @@ HEADER = """# TOPAS binary dose output
 
 
 class CombineDoseChunksTests(unittest.TestCase):
-    def make_project(self, chunks=2, case_id="smoke_field", profile="smoke"):
+    def make_project(self, chunks=2, case_id="smoke_field", profile="smoke", batch_id=None):
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)
-        manifest = root / "generated" / profile / "manifest.csv"
+        relative_profile = Path(profile) / batch_id if batch_id else Path(profile)
+        manifest = root / "generated" / relative_profile / "manifest.csv"
         manifest.parent.mkdir(parents=True)
         rows = []
-        field_dir = root / "output" / profile / case_id
+        field_dir = root / "output" / relative_profile / case_id
         field_dir.mkdir(parents=True)
         for chunk in range(1, chunks + 1):
             stem = field_dir / f"Dose_chunk_{chunk:03d}_of_{chunks:03d}"
             rows.append({
                 "case_id": case_id,
                 "profile": profile,
+                "batch_id": batch_id or "",
                 "chunk": chunk,
                 "chunks": chunks,
                 "output_path": str(stem.relative_to(root)),
@@ -44,7 +46,7 @@ class CombineDoseChunksTests(unittest.TestCase):
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=("case_id", "profile", "chunk", "chunks", "output_path"),
+                fieldnames=("case_id", "profile", "batch_id", "chunk", "chunks", "output_path"),
             )
             writer.writeheader()
             writer.writerows(rows)
@@ -145,6 +147,23 @@ class CombineDoseChunksTests(unittest.TestCase):
             ])
             self.assertEqual(result, 0)
             self.assertFalse((field_dir / "Dose_combined.bin").exists())
+
+    def test_batch_manifest_and_output_discovery(self):
+        temporary, root, field_dir, _ = self.make_project(
+            chunks=1, profile="production", case_id="production_field",
+            batch_id="extra_4pct",
+        )
+        with temporary:
+            values=np.arange(8,dtype=float)
+            self.write_chunk(field_dir,1,1,values)
+            result=combine.main([
+                "--profile","production","--batch-id","extra_4pct",
+                "--project-root",str(root),
+            ])
+            self.assertEqual(result,0)
+            np.testing.assert_array_equal(
+                np.fromfile(field_dir/"Dose_combined.bin",dtype="<f8"),values,
+            )
 
     def test_production_manifest_discovery_and_other_fields_continue(self):
         temporary, root, good_dir, rows = self.make_project(

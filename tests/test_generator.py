@@ -222,6 +222,34 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual([sum(chunk[i] for chunk in chunks) for i in range(3)], [10, 11, 12])
         self.assertEqual(g.seed("smoke", "case", 1), g.seed("smoke", "case", 1))
         self.assertNotEqual(g.seed("smoke", "case", 1), g.seed("smoke", "case", 2))
+        self.assertNotEqual(
+            g.seed("production", "case", 1, "initial_1pct"),
+            g.seed("production", "case", 1, "extra_4pct"),
+        )
+
+    def test_optional_batch_id_paths_and_validation(self):
+        config=copy.deepcopy(self.config)
+        config["profiles"]["production"]["batch_id"]="extra_4pct"
+        case=g.cases(config,"production",self.envelope)[0]
+        histories=[1]*g.integer(g.table(config,"beam"),"spot_count")
+        task,output,batch_seed=g.render_task(
+            config,case,"production",1,1,histories,"extra_4pct",
+        )
+        self.assertIn("generated/production/extra_4pct/fields/",task)
+        self.assertIn("output/production/extra_4pct/",output)
+        self.assertNotEqual(batch_seed,g.seed("production",case.case_id,1))
+        paths=g.case_output_directories(ROOT,config,"production",self.envelope)
+        self.assertTrue(all("/output/production/extra_4pct/" in str(path) for path in paths))
+
+        source=(ROOT/"study.toml").read_text()
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"study.toml"
+            path.write_text(source.replace(
+                '[profiles.production]',
+                '[profiles.production]\nbatch_id = "bad/batch"',
+            ))
+            with self.assertRaisesRegex(g.Error,"batch_id must contain only"):
+                g.load_config(path)
 
     def test_reference_beam(self):
         histories = g.beam_histories(ROOT / "reference/beam_1_2e5.txt", 2151)
