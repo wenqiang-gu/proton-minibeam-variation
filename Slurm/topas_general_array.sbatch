@@ -95,6 +95,8 @@ trap report_runtime EXIT
 : "${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR is not set}"
 : "${TOPAS_MANIFEST:?TOPAS_MANIFEST is not set}"
 : "${TOPAS_MANIFEST_SHA256:?TOPAS_MANIFEST_SHA256 is not set}"
+: "${TOPAS_TASK_HASHES:?TOPAS_TASK_HASHES is not set}"
+: "${TOPAS_TASK_HASHES_SHA256:?TOPAS_TASK_HASHES_SHA256 is not set}"
 : "${TOPAS_TASK_COUNT:?TOPAS_TASK_COUNT is not set}"
 : "${TOPAS_ENV:?TOPAS_ENV is not set; submit with --topas-env FILE or export TOPAS_ENV}"
 
@@ -131,6 +133,15 @@ if [[ $actual_hash != "$TOPAS_MANIFEST_SHA256" ]]; then
     echo "Manifest checksum changed after submission: $TOPAS_MANIFEST" >&2
     exit 2
 fi
+if [[ ! -s $TOPAS_TASK_HASHES ]]; then
+    echo "Task hash manifest is missing or empty: $TOPAS_TASK_HASHES" >&2
+    exit 2
+fi
+actual_task_hashes_hash=$(sha256sum "$TOPAS_TASK_HASHES" | awk '{print $1}')
+if [[ $actual_task_hashes_hash != "$TOPAS_TASK_HASHES_SHA256" ]]; then
+    echo "Task hash manifest changed after submission: $TOPAS_TASK_HASHES" >&2
+    exit 2
+fi
 
 topas_input=$(manifest_task "$TOPAS_MANIFEST" "$SLURM_ARRAY_TASK_ID")
 case "$topas_input" in
@@ -141,6 +152,16 @@ case "$topas_input" in
 esac
 if [[ $topas_input != *.txt ]] || [[ ! -s $project_dir/$topas_input ]]; then
     echo "TOPAS input is missing, empty, or not a .txt file: $topas_input" >&2
+    exit 2
+fi
+expected_input_hash=$(awk -F '\t' -v path="$topas_input" '$2 == path {print $1}' "$TOPAS_TASK_HASHES")
+if [[ ! $expected_input_hash =~ ^[[:xdigit:]]{64}$ ]]; then
+    echo "Task hash manifest has no unique valid hash for: $topas_input" >&2
+    exit 2
+fi
+actual_input_hash=$(sha256sum "$project_dir/$topas_input" | awk '{print $1}')
+if [[ $actual_input_hash != "$expected_input_hash" ]]; then
+    echo "Archived TOPAS input changed after submission: $topas_input" >&2
     exit 2
 fi
 
@@ -194,6 +215,7 @@ echo "Array job: ${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}"
 echo "Array task: $SLURM_ARRAY_TASK_ID of $TOPAS_TASK_COUNT"
 echo "Manifest: $TOPAS_MANIFEST"
 echo "Manifest SHA-256: $TOPAS_MANIFEST_SHA256"
+echo "TOPAS input SHA-256: $actual_input_hash"
 echo "TOPAS environment: $TOPAS_ENV"
 echo "Node: $(hostname)"
 echo "Allocated CPUs: $SLURM_CPUS_PER_TASK"

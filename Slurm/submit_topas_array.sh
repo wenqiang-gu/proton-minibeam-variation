@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build an immutable input manifest and submit one generic TOPAS array task per file.
+# Archive selected inputs, build immutable manifests, and submit one array task per file.
 
 set -euo pipefail
 
@@ -9,7 +9,8 @@ Usage: Slurm/submit_topas_array.sh [options] TOPAS_INPUT.txt [...]
        Slurm/submit_topas_array.sh [options] --manifest INPUTS.txt
 
 The shell expands globs before this helper runs. Inputs are validated, sorted,
-and frozen in a checksummed manifest. One Slurm array task runs each input.
+and moved from a top-level tasks/ queue into tasks/submitted/SUBMISSION_TAG/.
+One Slurm array task runs each archived input.
 
 Options:
   --throttle N       Maximum simultaneous array tasks (default: 5).
@@ -31,6 +32,7 @@ Options:
 Every input must directly define one positive i:Ts/NumberOfThreads value. All
 selected inputs must use the same value. The TOPAS environment must be supplied
 explicitly with --topas-env or TOPAS_ENV; no cluster-specific path is assumed.
+Inputs must be top-level .txt files in a directory named tasks.
 EOF
 }
 
@@ -195,8 +197,10 @@ fi
 
 raw_list=$(mktemp "${TMPDIR:-/tmp}/topas_inputs_raw.XXXXXX")
 sorted_list=$(mktemp "${TMPDIR:-/tmp}/topas_inputs_sorted.XXXXXX")
+raw_records=$(mktemp "${TMPDIR:-/tmp}/topas_records_raw.XXXXXX")
+sorted_records=$(mktemp "${TMPDIR:-/tmp}/topas_records_sorted.XXXXXX")
 cleanup() {
-    rm -f "$raw_list" "$sorted_list"
+    rm -f "$raw_list" "$sorted_list" "$raw_records" "$sorted_records"
 }
 trap cleanup EXIT
 
@@ -253,6 +257,12 @@ for input in "${inputs[@]}"; do
             ;;
     esac
 
+    input_parent=$(dirname -- "$absolute_input")
+    if [[ $(basename -- "$input_parent") != tasks ]]; then
+        echo "TOPAS input must be a top-level file in a directory named tasks: $absolute_input" >&2
+        exit 2
+    fi
+
     input_threads=$(extract_thread_count "$absolute_input") || exit $?
     if [[ -z $inferred_threads ]]; then
         inferred_threads=$input_threads
@@ -264,14 +274,23 @@ for input in "${inputs[@]}"; do
     fi
 
     relative_input=${absolute_input#"$project_root"/}
-    if [[ $relative_input == *$'\n'* ]]; then
-        echo "TOPAS input paths may not contain newlines: $relative_input" >&2
+    if [[ $relative_input == *$'\n'* || $relative_input == *$'\t'* ]]; then
+        echo "TOPAS input paths may not contain tabs or newlines: $relative_input" >&2
+        exit 2
+    fi
+    input_hash=$(sha256sum "$absolute_input" | awk '{print $1}')
+    if input_mode=$(stat -c '%a' "$absolute_input" 2>/dev/null); then :
+    elif input_mode=$(stat -f '%Lp' "$absolute_input" 2>/dev/null); then :
+    else
+        echo "Could not read file permissions: $absolute_input" >&2
         exit 2
     fi
     printf '%s\n' "$relative_input" >> "$raw_list"
+    printf '%s\t%s\t%s\n' "$relative_input" "$input_hash" "$input_mode" >> "$raw_records"
 done
 
 LC_ALL=C sort "$raw_list" > "$sorted_list"
+LC_ALL=C sort -t $'\t' -k1,1 "$raw_records" > "$sorted_records"
 duplicate=$(uniq -d "$sorted_list" | head -n 1 || true)
 if [[ -n $duplicate ]]; then
     echo "Duplicate TOPAS input supplied: $duplicate" >&2
@@ -295,6 +314,38 @@ echo "TOPAS environment: $topas_env"
 echo "First input: $(head -n 1 "$sorted_list")"
 echo "Last input: $(tail -n 1 "$sorted_list")"
 
+submission_tag=$(date +%Y%m%dT%H%M%S)_$$
+
+warn_if_previously_submitted() {
+    local original=$1
+    local digest=$2
+    local receipt recorded_original recorded_hash
+    [[ -d $project_root/Slurm/logs ]] || return 0
+    while IFS= read -r receipt; do
+        while IFS=$'\t' read -r marker recorded_original recorded_hash _; do
+            [[ $marker == TASK ]] || continue
+            if [[ $recorded_original == "$original" || $recorded_hash == "$digest" ]]; then
+                echo "WARNING: task appears in an earlier submission: $original" >&2
+                echo "WARNING: resubmission may repeat a random seed and overwrite the same dose output." >&2
+                return 0
+            fi
+        done < "$receipt"
+    done < <(find "$project_root/Slurm/logs" -maxdepth 1 -type f -name 'topas_submission_*.txt' -print 2>/dev/null)
+}
+
+while IFS=$'\t' read -r original digest _; do
+    warn_if_previously_submitted "$original" "$digest"
+done < "$sorted_records"
+
+if [[ $dry_run == true ]]; then
+    echo "Planned submission archive tag: $submission_tag"
+    while IFS=$'\t' read -r original _; do
+        task_dir=$(dirname -- "$original")
+        archived="$task_dir/submitted/$submission_tag/$(basename -- "$original")"
+        echo "Would move: $original -> $archived"
+    done < "$sorted_records"
+fi
+
 sbatch_args=(--array="$array_spec" --cpus-per-task="$inferred_threads")
 [[ -z $time_limit ]] || sbatch_args+=(--time="$time_limit")
 [[ -z $memory ]] || sbatch_args+=(--mem="$memory")
@@ -308,33 +359,99 @@ if [[ $dry_run == true ]]; then
     printf 'Dry run command: sbatch'
     printf ' %q' "${sbatch_args[@]}"
     printf ' --export=%q %q\n' \
-        "ALL,TOPAS_ENV=$topas_env,TOPAS_MANIFEST=<manifest>,TOPAS_MANIFEST_SHA256=<sha256>,TOPAS_TASK_COUNT=$task_count" \
+        "ALL,TOPAS_ENV=$topas_env,TOPAS_MANIFEST=<manifest>,TOPAS_MANIFEST_SHA256=<sha256>,TOPAS_TASK_HASHES=<hashes>,TOPAS_TASK_HASHES_SHA256=<sha256>,TOPAS_TASK_COUNT=$task_count" \
         "$worker"
     echo "Dry run only; no manifest was written and no job was submitted."
     exit 0
 fi
 
 mkdir -p "$project_root/Slurm/logs"
-manifest=$project_root/Slurm/logs/topas_manifest_$(date +%Y%m%dT%H%M%S)_$$.txt
-cp "$sorted_list" "$manifest"
+manifest=$project_root/Slurm/logs/topas_manifest_${submission_tag}.txt
+hash_manifest=$project_root/Slurm/logs/topas_task_hashes_${submission_tag}.txt
+receipt=$project_root/Slurm/logs/topas_submission_${submission_tag}.txt
+archived_list=$(mktemp "${TMPDIR:-/tmp}/topas_archived.XXXXXX")
+hash_list=$(mktemp "${TMPDIR:-/tmp}/topas_hashes.XXXXXX")
+moved_records=$(mktemp "${TMPDIR:-/tmp}/topas_moved.XXXXXX")
+
+rollback_submission() {
+    local original archived mode
+    if [[ -s $moved_records ]]; then
+        while IFS=$'\t' read -r original archived mode; do
+            [[ -e $project_root/$archived ]] || continue
+            chmod "$mode" "$project_root/$archived" || true
+            mv "$project_root/$archived" "$project_root/$original" || true
+        done < "$moved_records"
+    fi
+    if [[ -s $moved_records ]]; then
+        while IFS=$'\t' read -r _ archived _; do
+            rmdir "$(dirname -- "$project_root/$archived")" 2>/dev/null || true
+        done < "$moved_records"
+    fi
+    rm -f "$manifest" "$hash_manifest" "$receipt" "$archived_list" "$hash_list" "$moved_records"
+}
+
+trap rollback_submission EXIT
+
+while IFS=$'\t' read -r original digest mode; do
+    task_dir=$(dirname -- "$original")
+    archived="$task_dir/submitted/$submission_tag/$(basename -- "$original")"
+    if [[ -e $project_root/$archived ]]; then
+        echo "Submission archive destination already exists: $archived" >&2
+        rollback_submission
+        exit 2
+    fi
+    mkdir -p "$project_root/$task_dir/submitted/$submission_tag"
+    mv "$project_root/$original" "$project_root/$archived"
+    printf '%s\t%s\t%s\n' "$original" "$archived" "$mode" >> "$moved_records"
+    chmod 0444 "$project_root/$archived"
+    printf '%s\n' "$archived" >> "$archived_list"
+    printf '%s\t%s\n' "$digest" "$archived" >> "$hash_list"
+done < "$sorted_records"
+
+cp "$archived_list" "$manifest"
+cp "$hash_list" "$hash_manifest"
 chmod 0444 "$manifest"
+chmod 0444 "$hash_manifest"
 manifest_hash=$(sha256sum "$manifest" | awk '{print $1}')
-export_spec="ALL,TOPAS_ENV=$topas_env,TOPAS_MANIFEST=$manifest,TOPAS_MANIFEST_SHA256=$manifest_hash,TOPAS_TASK_COUNT=$task_count"
+hash_manifest_hash=$(sha256sum "$hash_manifest" | awk '{print $1}')
+export_spec="ALL,TOPAS_ENV=$topas_env,TOPAS_MANIFEST=$manifest,TOPAS_MANIFEST_SHA256=$manifest_hash,TOPAS_TASK_HASHES=$hash_manifest,TOPAS_TASK_HASHES_SHA256=$hash_manifest_hash,TOPAS_TASK_COUNT=$task_count"
 
 echo "Manifest: $manifest"
 echo "Manifest SHA-256: $manifest_hash"
+echo "Task hashes: $hash_manifest"
 printf 'Command: sbatch'
 printf ' %q' "${sbatch_args[@]}"
 printf ' --export=%q %q\n' "$export_spec" "$worker"
 
 cd "$project_root"
 if ! submission=$(sbatch --parsable "${sbatch_args[@]}" --export="$export_spec" "$worker"); then
-    chmod u+w "$manifest"
-    rm -f "$manifest"
-    echo "Submission failed; the unused manifest was removed" >&2
+    chmod u+w "$manifest" "$hash_manifest" 2>/dev/null || true
+    rollback_submission
+    echo "Submission failed; archived tasks were restored" >&2
     exit 1
 fi
 
 job_id=${submission%%;*}
+trap cleanup EXIT
+{
+    echo "Submission tag: $submission_tag"
+    echo "Slurm job ID: $job_id"
+    echo "Submitted at: $(date --iso-8601=seconds 2>/dev/null || date)"
+    echo "TOPAS environment: $topas_env"
+    echo "Manifest: $manifest"
+    echo "Manifest SHA-256: $manifest_hash"
+    echo "Task hashes: $hash_manifest"
+    printf 'Scheduler arguments:'
+    printf ' %q' "${sbatch_args[@]}"
+    printf '\n'
+    while IFS=$'\t' read -r original digest _; do
+        task_dir=$(dirname -- "$original")
+        archived="$task_dir/submitted/$submission_tag/$(basename -- "$original")"
+        printf 'TASK\t%s\t%s\t%s\n' "$original" "$digest" "$archived"
+    done < "$sorted_records"
+} > "$receipt"
+chmod 0444 "$receipt"
+rm -f "$archived_list" "$hash_list" "$moved_records"
 echo "Submitted array job: $job_id"
+echo "Submission receipt: $receipt"
 echo "Keep the manifest for retries; task N always maps to manifest line N."

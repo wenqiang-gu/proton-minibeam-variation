@@ -217,6 +217,33 @@ submissions. The CLI option takes precedence when both are present. Optional
 `--account`, `--qos`, `--partition`, `--time`, and `--mem` arguments are passed
 to `sbatch`; inspect the complete command first with `--dry-run`.
 
+The positional arguments are an explicit queue selection. A shell glob can
+submit any chosen top-level task files:
+
+```sh
+Slurm/submit_topas_array.sh \
+  --topas-env "$TOPAS_ENV" \
+  generated/production/extra_4pct/tasks/*.txt
+```
+
+After validation, selected files move to a unique directory below
+`tasks/submitted/`, and the frozen Slurm manifest points to those archived
+paths. Files left at the top level of `tasks/` have not been submitted by this
+workflow. Each successful submission writes a receipt and task-hash manifest
+under `Slurm/logs/`; workers reject an archived task if its contents change.
+If `sbatch` fails, the files are restored to their original locations.
+
+Submitting a regenerated task that has the same original path or content as a
+previous submission prints a warning but continues. Pay attention to that
+warning: an identical task can repeat its random seed and overwrite its dose
+output. `--dry-run` displays all planned moves without changing any files.
+
+Because submitted tasks have moved out of the generated top-level queue,
+`generate_variations.py --check` will report them as missing. Regenerating the
+profile recreates the queue. A forced regeneration can remove archived tasks
+inside that generated profile, so retain `Slurm/logs/` receipts and avoid
+`--force` while archived configurations are still needed.
+
 The default full-CT grid is 0.4 x 0.4 x 3 mm and can produce very large dose
 files; verify disk, memory, and scheduler limits with smoke runs before
 submitting production.
